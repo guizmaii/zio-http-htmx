@@ -13,6 +13,7 @@ object Router {
   val routes: App[Any] =
     Http.collect[Request] {
       case Method.GET -> Root           => Response.twirl(views.html.index())
+      case Method.GET -> Root / "names" => Response.twirl(partials.html.names(List("Pierre", "Paul", "Jacques")))
       case Method.GET -> Root / "ping"  => Response.ok
       case Method.GET -> Root / "hello" => Response.text("Hello World")
     } @@ cors(corsConfig) @@ debug @@ timeout(5.seconds)

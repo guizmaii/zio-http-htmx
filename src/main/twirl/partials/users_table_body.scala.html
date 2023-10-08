@@ -1,0 +1,11 @@
+@import com.guizmaii.zio.htmx.domain.User
+
+@(users: List[User])
+
+@for(user <- users) {
+    <tr>
+        <td>@user.firstName</td>
+        <td>@user.lastName</td>
+        <td>@user.email</td>
+    </tr>
+}

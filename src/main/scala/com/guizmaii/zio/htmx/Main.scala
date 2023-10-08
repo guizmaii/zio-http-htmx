@@ -1,5 +1,6 @@
 package com.guizmaii.zio.htmx
 
+import com.guizmaii.zio.htmx.services.UsersService
 import zio.*
 import zio.http.*
 import zio.http.Server.{Config, RequestStreaming}
@@ -59,5 +60,8 @@ object Main extends ZIOAppDefault {
     (
       bootSequence *>
         Server.serve(Router.routes)
-    ).provide(server)
+    ).provide(
+      server,
+      UsersService.live,
+    )
 }

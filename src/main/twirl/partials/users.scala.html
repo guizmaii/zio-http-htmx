@@ -1,0 +1,28 @@
+@import com.guizmaii.zio.htmx.domain.User
+
+@* Reproducing https://htmx.org/examples/active-search/ example *@
+<h3>
+    Search Contacts
+    <span class="htmx-indicator">Searching...</span>
+</h3>
+<input
+    class="form-control"
+    type="search"
+    name="search" placeholder="Begin Typing To Search Users..."
+    hx-get="/users/search"
+    hx-trigger="keyup changed delay:300ms, search"
+    hx-target="#search-results"
+    hx-indicator=".htmx-indicator"
+>
+
+<table class="table">
+    <thead>
+        <tr>
+            <th>First Name</th>
+            <th>Last Name</th>
+            <th>Email</th>
+        </tr>
+    </thead>
+    <tbody id="search-results">
+    </tbody>
+</table>

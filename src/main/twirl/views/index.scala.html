@@ -1,8 +1,44 @@
+@import com.guizmaii.zio.htmx.domain.User
+
+@(searchValue: Option[String] = None, users: Option[List[User]] = None)
+
 @main {
     <h1>Hello World</h1>
 
     <button hx-get="/names" hx-swap="outerHTML">Show names</button>
     <a href="/blog" hx-boost="true">Blog</a>
+    @* Reproducing https://htmx.org/examples/active-search/ example *@
+    <h3>
+        Search Contacts
+        <span class="htmx-indicator">Searching...</span>
+    </h3>
+    <input
+    class="form-control"
+    type="search"
+    name="search"
+    placeholder="Begin Typing To Search Users..."
+        @for(s <- searchValue) {
+            value="@s"
+        }
+    hx-get="/"
+    hx-trigger="keyup changed delay:300ms, search"
+    hx-target="#search-results"
+    hx-indicator=".htmx-indicator"
+    hx-push-url="true"
+    >
 
-    @partials.html.users()
+    <table class="table">
+        <thead>
+            <tr>
+                <th>First Name</th>
+                <th>Last Name</th>
+                <th>Email</th>
+            </tr>
+        </thead>
+        <tbody id="search-results">
+        @for(v <- users) {
+            partials.html.users_table_body(v)
+        }
+        </tbody>
+    </table>
 }

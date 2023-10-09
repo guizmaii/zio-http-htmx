@@ -4,7 +4,7 @@ import com.guizmaii.zio.htmx.domain.User
 import zio.{ULayer, ZLayer}
 
 trait UsersService {
-  def find(filter: Option[String]): List[User]
+  def find(filter: String): List[User]
 }
 
 object UsersService {
@@ -117,14 +117,15 @@ final class UserServiceLive extends UsersService {
       User("Caryn", "Hooper", "eu.enim.Etiam@ridiculus.org"),
     )
 
-  override def find(filter: Option[String]): List[User] =
+  override def find(filter: String): List[User] =
     filter match {
-      case None    => users
-      case Some(v) =>
+      case s if s.isBlank => users
+      case v              =>
+        val lowered = v.toLowerCase
         users.filter { user =>
-          user.firstName.toLowerCase.contains(v.toLowerCase) ||
-          user.lastName.toLowerCase.contains(v.toLowerCase) ||
-          user.email.toLowerCase.contains(v.toLowerCase)
+          user.firstName.toLowerCase.contains(lowered) ||
+          user.lastName.toLowerCase.contains(lowered) ||
+          user.email.toLowerCase.contains(lowered)
         }
     }
 }

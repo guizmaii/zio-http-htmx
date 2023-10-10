@@ -12,7 +12,6 @@ object Libraries {
   val zioHttp    = "dev.zio"      %% "zio-http"           % zioHttpVersion
   val zioLogging = "dev.zio"      %% "zio-logging-slf4j2" % "2.1.14"
   val logto      = "io.logto.sdk"  % "kotlin"             % "1.0.0"
-  val zioAES     = "com.guizmaii" %% "zio-aes"            % "0.2.0"
 
   val tests = Seq(
     "dev.zio" %% "zio-test"          % zioVersion,

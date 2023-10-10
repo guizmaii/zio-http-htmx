@@ -1,9 +1,11 @@
 package com.guizmaii.zio.htmx
 
-import com.guizmaii.zio.htmx.services.UsersService
+import com.guizmaii.zio.htmx.services.{LogToConfig, LogToService, UsersService}
 import zio.*
 import zio.http.*
+import zio.http.HttpAppMiddleware.*
 import zio.http.Server.{Config, RequestStreaming}
+import zio.http.internal.middlewares.Cors.CorsConfig
 import zio.logging.backend.SLF4J
 
 import java.lang.Runtime as JRuntime
@@ -19,6 +21,9 @@ object Main extends ZIOAppDefault {
   override val bootstrap: ZLayer[ZIOAppArgs, Any, Any] =
     (zio.Runtime.removeDefaultLoggers >>> SLF4J.slf4j) ++
       Runtime.setExecutor(Executor.makeDefault(autoBlocking = false))
+
+  // TODO Jules: Not prod ready. WARN: It's currectly also used for the webhooks API.
+  private val corsConfig: CorsConfig = CorsConfig(allowedOrigin = _ => Some(Header.AccessControlAllowOrigin.All))
 
   private val bootSequence: ZIO[Any, Throwable, Unit] =
     for {
@@ -56,12 +61,19 @@ object Main extends ZIOAppDefault {
     ) >>> Server.live
   }
 
+  private val app =
+    (
+      Router.routes ++ AuthRoutes.routes
+    ) @@ cors(corsConfig) @@ debug @@ timeout(5.seconds)
+
   override def run: ZIO[Environment & ZIOAppArgs & Scope, Any, Any] =
     (
-      bootSequence *>
-        Server.serve(Router.routes)
+      bootSequence *> Server.serve(app)
     ).provide(
       server,
       UsersService.live,
+      AppConfig.fromSystemEnv,
+      LogToConfig.fromSystemEnv,
+      LogToService.live,
     )
 }

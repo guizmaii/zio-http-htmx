@@ -7,6 +7,9 @@
         </encoder>
     </appender>
 
+
+    <logger name="com.guizmaii.zio.htmx" level="DEBUG"/>
+
     <root level="INFO">
         <appender-ref ref="STDOUT"/>
     </root>

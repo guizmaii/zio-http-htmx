@@ -67,7 +67,7 @@ object KindeConfig               {
 }
 
 trait IdentityProvider {
-  def getSignInUrl: URL
+  def getSignInUrl: (URL, String)
   def handleSignIn(code: String): Task[CodeTokenResponse]
   def refreshTokens(refreshToken: String): Task[RefreshTokenTokenResponse]
 }
@@ -103,7 +103,7 @@ final class Kinde(config: KindeConfig, client: ZEnvironment[Client], secureRando
   private val clientSecret       = config.clientSecret.value.toArray.mkString
   private val encodedRedirectUri = URLEncoder.encode(config.redirectUrl, StandardCharsets.UTF_8)
 
-  override val getSignInUrl: URL = {
+  override val getSignInUrl: (URL, String) = {
     // The state NEEDS to be generated out of a secure random generator
     // See: https://medium.com/keycloak/the-importance-of-the-state-parameter-in-oauth-5419c94bef4c
     //
@@ -126,7 +126,7 @@ final class Kinde(config: KindeConfig, client: ZEnvironment[Client], secureRando
       .decode(
         s"$authUrl?response_type=code&client_id=${config.clientId}&redirect_uri=$encodedRedirectUri&scope=$scopes&state=$state"
       )
-      .fold(throw _, identity) // The throw part should never happen
+      .fold(throw _, _ -> state) // The throw part should never happen
   }
 
   /**
@@ -176,7 +176,6 @@ final class Kinde(config: KindeConfig, client: ZEnvironment[Client], secureRando
                     }
         _        <- ZIO.logDebug(s"Raw response from Kinde - $raw")
         parsed   <- ZIO.fromEither(raw.fromJson[CodeTokenResponse].leftMap(new RuntimeException(_)))
-        _        <- ZIO.logDebug(s"Parsed response from Kinde - $parsed")
       } yield parsed
     ).logError("Error while handling the sign-in")
       .provideEnvironment(client)

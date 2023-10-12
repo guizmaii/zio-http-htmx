@@ -1,7 +1,7 @@
 package com.guizmaii.zio.htmx
 
-import com.guizmaii.zio.htmx.services.{LogToService, SignInSession}
-import io.logto.sdk.core.util.TokenUtils
+import com.guizmaii.zio.htmx.services.IdentityProvider
+import com.guizmaii.zio.htmx.types.CookieSignKey
 import zio.http.*
 import zio.json.{DecoderOps, DeriveJsonCodec, EncoderOps, JsonCodec}
 import zio.{Cause, Duration, Trace, ZEnvironment, ZIO, durationLong}
@@ -9,13 +9,39 @@ import zio.{Cause, Duration, Trace, ZEnvironment, ZIO, durationLong}
 import java.nio.charset.StandardCharsets
 import java.time.Instant
 import java.util.Base64
+import scala.annotation.nowarn
 import scala.util.control.NonFatal
 
 //noinspection NonAsciiCharacters
 object AuthRoutes {
 
-  private val cookieSignInName = "HTMX_SIGN_IN"
-  private val cookieTokensName = "HTMX_SESSION"
+  private val sessionCookieName = "HTMX_SESSION"
+
+  private def sessionInvalidationCookie(signKey: CookieSignKey): Cookie.Response =
+    Cookie
+      .Response(
+        name = sessionCookieName,
+        content = "",
+        maxAge = Some(Duration.Zero), // expires the session cookie
+        isSecure = false,             // TODO: should be `true` in Staging and Prod
+        isHttpOnly = true,
+        sameSite = Some(Cookie.SameSite.Strict),
+        path = Some(Path.root),
+      )
+      .sign(signKey)
+
+  private def newSessionCookie(signKey: CookieSignKey, newSession: SessionCookieContent, expiresIn: Long): Cookie.Response =
+    Cookie
+      .Response(
+        name = sessionCookieName,
+        content = SessionCookieContent.encode(newSession),
+        maxAge = Some(expiresIn.seconds),
+        isSecure = false, // TODO: should be `true` in Staging and Prod
+        isHttpOnly = true,
+        sameSite = Some(Cookie.SameSite.Strict),
+        path = Some(Path.root),
+      )
+      .sign(signKey)
 
   final case class SessionCookieContent(expiresAt: Instant, refreshToken: String, idToken: String)
   object SessionCookieContent {
@@ -34,94 +60,45 @@ object AuthRoutes {
   /**
    * Based on https://docs.logto.io/docs/recipes/integrate-logto/traditional/
    */
-  val routes: App[LogToService & AppConfig] =
+  val routes: App[IdentityProvider & AppConfig] =
     Http.collectZIO[Request] {
 
-      case Method.GET -> Root / "sign-in" =>
-        (
-          for {
-            config                     <- ZIO.service[AppConfig]
-            (signInSession, signInUri) <- ZIO.serviceWithZIO[LogToService](_.getSignInUrl)
-            cookie                      = Cookie
-                                            .Response(
-                                              name = cookieSignInName,
-                                              content = SignInSession.encode(signInSession),
-                                              maxAge = Some(1.hour), // TODO Jules: Is this correct?
-                                              isHttpOnly = true,
-                                            )
-                                            .sign(config.cookieSignKey)
-          } yield Response.redirect(signInUri).addCookie(cookie)
-        ).logError("Error while getting the sign-in URL")
-          .catchAll(_ => ZIO.succeed(Response.status(Status.InternalServerError)))
+      case Method.GET -> Root / "auth" / "sign-in" =>
+        for {
+          signInUri <- ZIO.serviceWith[IdentityProvider](_.getSignInUrl)
+        } yield Response.redirect(signInUri)
 
-      case req @ Method.GET -> Root / "callback" =>
+      case req @ Method.GET -> Root / "auth" / "callback" =>
         (
           ZIO
             .serviceWithZIO[AppConfig] { appConfig =>
-              req
-                .header(Header.Cookie)
-                .flatMap(_.value.find(_.name == cookieSignInName))
-                .map(_.unSign(appConfig.cookieSignKey).toRight("Invalid cookie signature"))
-                .map(_.flatMap(cookie => SignInSession.decode(cookie.content))) match {
-
-                case None => ZIO.succeed(Response.status(Status.BadRequest))
-
-                case Some(Left(e)) =>
-                  ZIO.logError(s"Failed decoding the cookie content: $e") *>
-                    ZIO.succeed(Response.status(Status.BadRequest))
-
-                case Some(Right(session)) =>
+              // TODO Jules: Validate state
+              req.url.queryParams.get("code").flatMap(_.headOption.filter(_.nonEmpty)) match {
+                case None       => ZIO.succeed(Response.status(Status.BadRequest))
+                case Some(code) =>
                   for {
-                    config      <- ZIO.service[AppConfig]
-                    url          = s"http://localhost:8080${req.url.encode}"
-                    response    <- ZIO.serviceWithZIO[LogToService](_.handleSignIn(session, url))
-                    newSession   = SessionCookieContent(
-                                     expiresAt = Instant.now().plusSeconds(response.getExpiresIn),
-                                     refreshToken = response.getRefreshToken,
-                                     idToken = response.getIdToken,
-                                   )
-                    tokensCookie = Cookie
-                                     .Response(
-                                       name = cookieTokensName,
-                                       content = SessionCookieContent.encode(newSession),
-                                       maxAge = Some(response.getExpiresIn.seconds),
-                                       isHttpOnly = true,
-                                     )
-                                     .sign(config.cookieSignKey)
-                    signInCookie = Cookie
-                                     .Response(
-                                       name = cookieSignInName,
-                                       content = "",
-                                       maxAge = Some(Duration.Zero),
-                                       isHttpOnly = true,
-                                     )
-                                     .sign(config.cookieSignKey)
-                  } yield Response.redirect(URL.root).addCookie(tokensCookie).addCookie(signInCookie)
+                    response  <- ZIO.serviceWithZIO[IdentityProvider](_.handleSignIn(code))
+                    newSession = SessionCookieContent(
+                                   expiresAt = Instant.now().plusSeconds(response.expiresIn),
+                                   refreshToken = response.refreshToken,
+                                   idToken = response.idToken,
+                                 )
+                  } yield Response.redirect(URL.root).addCookie(newSessionCookie(appConfig.cookieSignKey, newSession, response.expiresIn))
               }
             }
           )
           .logError("Error while handling the sign-in callback")
           .catchAll(_ => ZIO.succeed(Response.status(Status.InternalServerError)))
 
-      case Method.GET -> Root / "sign-out" =>
+      case Method.GET -> Root / "auth" / "sign-out" =>
         ZIO.serviceWith[AppConfig] { config =>
-          val tokensCookie =
-            Cookie
-              .Response(
-                name = cookieTokensName,
-                content = "",
-                maxAge = Some(Duration.Zero), // TODO Jules: Does it remove the cookie from the Browser?
-                isHttpOnly = true,
-              )
-              .sign(config.cookieSignKey)
-
-          Response.redirect(URL.root).addCookie(tokensCookie)
+          Response.redirect(URL.root).addCookie(sessionInvalidationCookie(config.cookieSignKey))
         }
     }
 
   private def sessionCookieMiddleware[Context: zio.Tag](
     appConfig: AppConfig,
-    logToService: LogToService, // TODO: Didn't found how to pass it by the env 🤔
+    kinde: IdentityProvider, // TODO: Didn't found how to pass it by the env 🤔
     extractContext: SessionCookieContent => Either[Throwable, Context],
   ): HttpAppMiddleware.WithOut[Nothing, Any, Nothing, Throwable, λ[Env => Env & Context], λ[A => Throwable]] =
     new HttpAppMiddleware.Contextual[Nothing, Any, Nothing, Throwable] {
@@ -138,51 +115,84 @@ object AuthRoutes {
           ZIO.suspendSucceed {
             request
               .header(Header.Cookie)
-              .flatMap(_.value.find(_.name == cookieTokensName))
-              .map(_.unSign(appConfig.cookieSignKey).toRight("Invalid cookie signature"))
-              .map(_.flatMap(cookie => SessionCookieContent.decode(cookie.content))) match {
+              .flatMap(_.value.find(_.name == sessionCookieName))
+              .map(
+                _.unSign(appConfig.cookieSignKey)
+                  .toRight("Invalid cookie signature")
+                  .flatMap(cookie => SessionCookieContent.decode(cookie.content))
+              ) match {
 
               case None => ZIO.succeed(Http.fromHandler(Handler.forbidden("Missing session cookie")))
 
               case Some(Left(e)) =>
                 ZIO
                   .logError(s"Invalid session cookie: $e")
-                  .as(Http.fromHandler(Handler.forbidden("Invalid session cookie")))
+                  .as(
+                    Http.fromHandler(
+                      Handler.response(
+                        Response.status(Status.Unauthorized).addCookie(sessionInvalidationCookie(appConfig.cookieSignKey))
+                      )
+                    )
+                  )
 
               case Some(Right(session)) =>
-                val isSessionStillValid = Instant.now().isBefore(session.expiresAt)
+                val sessionStillValid = Instant.now().isBefore(session.expiresAt)
 
-                if (isSessionStillValid)
+                if (sessionStillValid) {
                   extractContext(session) match {
                     case Right(context) => ZIO.succeed(providedHttp(context))
                     case Left(error)    =>
                       ZIO.logErrorCause("Error while extracting the context from the session cookie", Cause.fail(error)) *>
-                        ZIO.succeed(Http.fromHandler(Handler.forbidden("Invalid session cookie")))
+                        ZIO.succeed(
+                          Http.fromHandler(
+                            Handler.response(
+                              // TODO: Is `Unauthorized` appropriate here?
+                              // TODO: Should we really wipe the session cookie here?
+                              Response.status(Status.Unauthorized).addCookie(sessionInvalidationCookie(appConfig.cookieSignKey))
+                            )
+                          )
+                        )
                   }
-                else {
+                } else {
                   (
                     for {
-                      response       <- logToService.refreshTokens(session.refreshToken)
-                      newSession      = SessionCookieContent(
-                                          expiresAt = Instant.now().plusSeconds(response.getExpiresIn),
-                                          refreshToken = response.getRefreshToken,
-                                          idToken = response.getIdToken,
-                                        )
-                      refreshedCookie = Cookie.Response(
-                                          name = cookieTokensName,
-                                          content = SessionCookieContent.encode(newSession),
-                                          maxAge = Some(response.getExpiresIn.seconds),
-                                          isHttpOnly = true,
-                                        )
-                      r              <- extractContext(newSession) match {
-                                          case Right(context) => ZIO.succeed(providedHttp(context).map(_.addCookie(refreshedCookie)))
-                                          case Left(error)    =>
-                                            ZIO.logErrorCause("Error while extracting the context from the session cookie", Cause.fail(error)) *>
-                                              ZIO.succeed(Http.fromHandler(Handler.forbidden("Invalid session cookie")))
-                                        }
+                      response  <- kinde.refreshTokens(session.refreshToken)
+                      newSession = SessionCookieContent(
+                                     expiresAt = Instant.now().plusSeconds(response.expiresIn),
+                                     refreshToken = response.refreshToken,
+                                     idToken = response.idToken,
+                                   )
+                      r         <- extractContext(newSession) match {
+                                     case Right(context) =>
+                                       ZIO.succeed {
+                                         providedHttp(context).map(
+                                           _.addCookie(newSessionCookie(appConfig.cookieSignKey, newSession, response.expiresIn))
+                                         )
+                                       }
+                                     case Left(error)    =>
+                                       ZIO.logErrorCause("Error while extracting the context from the session cookie", Cause.fail(error)) *>
+                                         ZIO.succeed {
+                                           Http.fromHandler(
+                                             Handler.response(
+                                               // TODO: Is `Unauthorized` appropriate here?
+                                               // TODO: Should we really wipe the session cookie here?
+                                               Response.status(Status.Unauthorized).addCookie(sessionInvalidationCookie(appConfig.cookieSignKey))
+                                             )
+                                           )
+                                         }
+                                   }
                     } yield r
                   ).logError("Error while refreshing the tokens")
-                    .catchAll(_ => ZIO.succeed(Http.fromHandler(Handler.response(Response.redirect(URL.root.withPath("/sign-in"))))))
+                    .catchAll(_ =>
+                      ZIO.succeed(
+                        Http.fromHandler(
+                          Handler.response(
+                            // TODO: /sign-in URL isn't the correct one here
+                            Response.redirect(URL.root.withPath("/sign-in")).addCookie(sessionInvalidationCookie(appConfig.cookieSignKey))
+                          )
+                        )
+                      )
+                    )
                 }
             }
           }
@@ -192,17 +202,25 @@ object AuthRoutes {
 
   final case class User(email: String)
 
+  // TODO Jules: https://kinde.com/docs/build/about-id-tokens/
+  final case class IdToken(email: String)
+  object IdToken {
+    // TODO Jules
+    @nowarn
+    def decode(s: String): IdToken = IdToken(email = "toto@example.com")
+  }
+
   def authMiddleware(
     appConfig: AppConfig,
-    logToService: LogToService,
+    logToService: IdentityProvider,
   ): HttpAppMiddleware.WithOut[Nothing, Any, Nothing, Throwable, λ[Env => Env & User], λ[A => Throwable]] =
     sessionCookieMiddleware[User](
       appConfig,
       logToService,
       session =>
         try {
-          val idToken = TokenUtils.INSTANCE.decodeIdToken(session.idToken)
-          Right(User(email = idToken.getEmail))
+          val idToken = IdToken.decode(session.idToken)
+          Right(User(email = idToken.email))
         } catch {
           case NonFatal(e) => Left(e)
         },

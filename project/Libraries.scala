@@ -11,7 +11,6 @@ object Libraries {
   val prelude    = "dev.zio"      %% "zio-prelude"        % "1.0.0-RC21"
   val zioHttp    = "dev.zio"      %% "zio-http"           % zioHttpVersion
   val zioLogging = "dev.zio"      %% "zio-logging-slf4j2" % "2.1.14"
-  val logto      = "io.logto.sdk"  % "kotlin"             % "1.0.0"
 
   val tests = Seq(
     "dev.zio" %% "zio-test"          % zioVersion,

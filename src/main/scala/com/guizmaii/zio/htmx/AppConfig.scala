@@ -10,7 +10,7 @@ object AppConfig {
 
   private val config: ConfigDescriptor[AppConfig] =
     (
-      trimmedString("COOKIE_SIGN_KEY").toSubType(CookieSignKey)
+      trimmedString("APP_COOKIE_SIGN_KEY").toSubType(CookieSignKey)
     ).to[AppConfig]
 
   val fromSystemEnv: ZLayer[Any, ReadError[String], AppConfig] = ZConfig.fromSystemEnv(config)

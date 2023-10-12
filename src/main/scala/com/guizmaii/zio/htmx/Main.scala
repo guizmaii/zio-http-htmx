@@ -1,6 +1,6 @@
 package com.guizmaii.zio.htmx
 
-import com.guizmaii.zio.htmx.services.{LogToConfig, LogToService, UsersService}
+import com.guizmaii.zio.htmx.services.{IdentityProvider, KindeConfig, UsersService}
 import zio.*
 import zio.http.*
 import zio.http.HttpAppMiddleware.*
@@ -73,7 +73,8 @@ object Main extends ZIOAppDefault {
       server,
       UsersService.live,
       AppConfig.fromSystemEnv,
-      LogToConfig.fromSystemEnv,
-      LogToService.live,
+      KindeConfig.fromSystemEnv,
+      IdentityProvider.kinde,
+      Client.default,
     )
 }

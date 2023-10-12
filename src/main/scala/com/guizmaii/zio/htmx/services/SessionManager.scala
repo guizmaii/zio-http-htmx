@@ -70,8 +70,10 @@ final class SessionManagerLive(cookieSignKey: CookieSignKey, identityProvider: I
         maxAge = Some(1.hour), // This cookie is valid only 1h
         isSecure = false,      // TODO: should be `true` in Staging and Prod
         isHttpOnly = true,
-        sameSite = Some(Cookie.SameSite.Strict),
-        path = Some(Path.root / "auth"),
+        sameSite = Some(
+          Cookie.SameSite.Lax
+        ),                     // Needs to be Lax otherwise the cookie isn't included in the `/auth/callback` request coming from Kinde
+        path = Some(Path.root),
       )
       .sign(cookieSignKey)
 
@@ -83,8 +85,8 @@ final class SessionManagerLive(cookieSignKey: CookieSignKey, identityProvider: I
         maxAge = Some(Duration.Zero), // expires the session cookie
         isSecure = false,             // TODO: should be `true` in Staging and Prod
         isHttpOnly = true,
-        sameSite = Some(Cookie.SameSite.Strict),
-        path = Some(Path.root / "auth"),
+        sameSite = Some(Cookie.SameSite.Lax),
+        path = Some(Path.root),
       )
       .sign(cookieSignKey)
 

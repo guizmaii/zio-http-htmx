@@ -41,4 +41,3 @@ lazy val root =
       libraryDependencies ++= Seq(zioHttp) ++ loggingRuntime ++ zioConfig,
       testFrameworks += new TestFramework("zio.test.sbt.ZTestFramework"),
     )
-

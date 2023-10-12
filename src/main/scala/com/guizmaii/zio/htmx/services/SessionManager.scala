@@ -49,8 +49,6 @@ object SessionManager {
     }
 }
 
-// TODO: TO remove
-@nowarn
 //noinspection NonAsciiCharacters
 final class SessionManagerLive(cookieSignKey: CookieSignKey, identityProvider: IdentityProvider) extends SessionManager {
   private val signInCookieName: String = "HTMX_SIGN_IN"

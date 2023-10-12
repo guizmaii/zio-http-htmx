@@ -52,7 +52,8 @@ final case class KindeConfig(
   domain: NonEmptyString,
   clientId: NonEmptyString,
   clientSecret: Secret,
-  redirectUrl: NonEmptyString,
+  callbackUrl: NonEmptyString,
+  logoutRedirectUrl: NonEmptyString,
 )
 object KindeConfig               {
   private val config: ConfigDescriptor[KindeConfig] =
@@ -60,7 +61,8 @@ object KindeConfig               {
       nonEmptyString("KINDE_DOMAIN")
         <*> nonEmptyString("KINDE_CLIENT_ID")
         <*> secret("KINDE_CLIENT_SECRET")
-        <*> nonEmptyString("KINDE_REDIRECT_URL")
+        <*> nonEmptyString("KINDE_CALLBACK_URL")
+        <*> nonEmptyString("KINDE_LOGOUT_REDIRECT_URL")
     ).to[KindeConfig]
 
   val fromSystemEnv: ZLayer[Any, ReadError[String], KindeConfig] = ZConfig.fromSystemEnv(config)
@@ -70,6 +72,7 @@ trait IdentityProvider {
   def getSignInUrl: (URL, String)
   def handleSignIn(code: String): Task[CodeTokenResponse]
   def refreshTokens(refreshToken: String): Task[RefreshTokenTokenResponse]
+  def logoutUrl: URL
 }
 
 object IdentityProvider {
@@ -99,9 +102,9 @@ final class Kinde(config: KindeConfig, client: ZEnvironment[Client], secureRando
    */
   private val scopes: String     = "openid%20offline%20profile%20email"
   private val authUrl: String    = s"${config.domain}/oauth2/auth"
-  private val tokenUrl: URL      = URL.decode(s"${config.domain}/oauth2/token").fold(throw _, identity) // Should never happen
+  private val tokenUrl: URL      = URL.decode(s"${config.domain}/oauth2/token").fold(throw _, identity) // throw side should never happen
   private val clientSecret       = config.clientSecret.value.toArray.mkString
-  private val encodedRedirectUri = URLEncoder.encode(config.redirectUrl, StandardCharsets.UTF_8)
+  private val encodedRedirectUri = URLEncoder.encode(config.callbackUrl, StandardCharsets.UTF_8)
 
   override val getSignInUrl: (URL, String) = {
     // The state NEEDS to be generated out of a secure random generator
@@ -159,7 +162,7 @@ final class Kinde(config: KindeConfig, client: ZEnvironment[Client], secureRando
                             "client_id"     -> config.clientId,
                             "client_secret" -> clientSecret,
                             "grant_type"    -> "authorization_code",
-                            "redirect_uri"  -> config.redirectUrl,
+                            "redirect_uri"  -> config.callbackUrl,
                             "code"          -> code,
                           )
                         ),
@@ -189,4 +192,6 @@ final class Kinde(config: KindeConfig, client: ZEnvironment[Client], secureRando
       } yield ???
     ).logError("Error while refreshing the tokens")
 
+  override val logoutUrl: URL =
+    URL.decode(s"${config.domain}/logout?redirect=${config.logoutRedirectUrl}").fold(throw _, identity) // throw side should never happen
 }

@@ -52,10 +52,10 @@ object AuthRoutes {
         } yield response
 
       case Method.GET -> Root / "auth" / "sign-out" =>
-        // TODO Jules
-        ZIO.serviceWith[SessionManager] { sessionManager =>
-          Response.redirect(URL.root).addCookie(sessionManager.sessionInvalidationCookie)
-        }
+        for {
+          sessionManager <- ZIO.service[SessionManager]
+          idp            <- ZIO.service[IdentityProvider]
+        } yield Response.redirect(idp.logoutUrl).addCookie(sessionManager.sessionInvalidationCookie)
     }
 
 }

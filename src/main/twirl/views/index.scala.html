@@ -1,9 +1,9 @@
 @import com.guizmaii.zio.htmx.domain.User
 
-@(searchValue: Option[String] = None, users: Option[List[User]] = None)
+@(loggedUser: Option[User] = None)(searchValue: Option[String] = None, users: Option[List[User]] = None)
 
 @main {
-    <h1>Hello World</h1>
+    <h1>Hello @loggedUser.map(_.firstName).getOrElse("htmx")</h1>
 
     <button hx-get="/names" hx-swap="outerHTML">Show names</button>
     <a href="/blog" hx-boost="true">Blog</a>

@@ -25,9 +25,11 @@ final case class SessionCookieContent(expiresAt: Instant, refreshToken: String, 
 object SessionCookieContent {
   implicit private val codec: JsonCodec[SessionCookieContent] = DeriveJsonCodec.gen[SessionCookieContent]
 
+  // TODO: Needs encryption
   def encode(sessionCookieContent: SessionCookieContent): String =
     Base64.getUrlEncoder.encodeToString(sessionCookieContent.toJson.getBytes(StandardCharsets.UTF_8))
 
+  // TODO: Needs decryption
   def decode(s: String): Either[String, SessionCookieContent] =
     try new String(Base64.getUrlDecoder.decode(s), StandardCharsets.UTF_8).fromJson[SessionCookieContent]
     catch {
@@ -45,6 +47,8 @@ trait SessionManager {
   def sessionInvalidationCookie: Cookie.Response
 
   def authMiddleware: HttpAppMiddleware.WithOut[Nothing, Any, Nothing, Throwable, λ[Env => Env & User], λ[A => Throwable]]
+
+  def loggedUser(request: Request): Option[User]
 }
 
 object SessionManager {
@@ -70,9 +74,8 @@ final class SessionManagerLive(cookieSignKey: CookieSignKey, identityProvider: I
         maxAge = Some(1.hour), // This cookie is valid only 1h
         isSecure = false,      // TODO: should be `true` in Staging and Prod
         isHttpOnly = true,
-        sameSite = Some(
-          Cookie.SameSite.Lax
-        ),                     // Needs to be Lax otherwise the cookie isn't included in the `/auth/callback` request coming from Kinde
+        // Needs to be Lax otherwise the cookie isn't included in the `/auth/callback` request coming from Kinde
+        sameSite = Some(Cookie.SameSite.Lax),
         path = Some(Path.root),
       )
       .sign(cookieSignKey)
@@ -98,7 +101,8 @@ final class SessionManagerLive(cookieSignKey: CookieSignKey, identityProvider: I
         maxAge = Some(expiresIn),
         isSecure = false, // TODO: should be `true` in Staging and Prod
         isHttpOnly = true,
-        sameSite = Some(Cookie.SameSite.Strict),
+        // Needs to be Lax otherwise the cookie isn't included in `/` request coming from Kinde after login
+        sameSite = Some(Cookie.SameSite.Lax),
         path = Some(Path.root),
       )
       .sign(cookieSignKey)
@@ -119,7 +123,7 @@ final class SessionManagerLive(cookieSignKey: CookieSignKey, identityProvider: I
         maxAge = Some(Duration.Zero), // expires the session cookie
         isSecure = false,             // TODO: should be `true` in Staging and Prod
         isHttpOnly = true,
-        sameSite = Some(Cookie.SameSite.Strict),
+        sameSite = Some(Cookie.SameSite.Lax),
         path = Some(Path.root),
       )
       .sign(cookieSignKey)
@@ -133,6 +137,22 @@ final class SessionManagerLive(cookieSignKey: CookieSignKey, identityProvider: I
         case NonFatal(e) => Left(e)
       }
     )
+
+  override def loggedUser(request: Request): Option[User] =
+    getCookieContent(request, sessionCookieName)
+      .flatMap(content =>
+        SessionCookieContent.decode(content) match {
+          case Left(_)        => None
+          case Right(session) =>
+            // TODO Jules: "refresh token" part is missing
+            try {
+              val idToken = IdToken.decode(session.idToken)
+              Some(User(firstName = idToken.firstName, lastName = idToken.lastName, email = idToken.email))
+            } catch {
+              case NonFatal(_) => None
+            }
+        }
+      )
 
   private def getCookieContent(request: Request, cookieName: String): Option[String] =
     request

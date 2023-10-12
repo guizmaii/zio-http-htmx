@@ -18,8 +18,6 @@ ThisBuild / scalafixDependencies ++= List(
   "io.github.ghostbuster91.scalafix-unified" %% "unified"  % "0.0.9",
 )
 
-ThisBuild / resolvers ++= Resolver.sonatypeOssRepos("staging")
-
 // ### Aliases ###
 
 addCommandAlias("tc", "Test/compile")

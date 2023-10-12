@@ -13,6 +13,14 @@ import java.util.Base64
 import scala.annotation.nowarn
 import scala.util.control.NonFatal
 
+// TODO Jules: https://kinde.com/docs/build/about-id-tokens/
+final case class IdToken(firstName: String, lastName: String, email: String)
+object IdToken {
+  // TODO Jules
+  @nowarn
+  def decode(s: String): IdToken = IdToken(firstName = "Toto", lastName = "Tata", email = "toto@example.com")
+}
+
 final case class SessionCookieContent(expiresAt: Instant, refreshToken: String, idToken: String)
 object SessionCookieContent {
   implicit private val codec: JsonCodec[SessionCookieContent] = DeriveJsonCodec.gen[SessionCookieContent]
@@ -94,17 +102,12 @@ final class SessionManagerLive(cookieSignKey: CookieSignKey, identityProvider: I
       .sign(cookieSignKey)
 
   override def getSignInState(request: Request): Option[String] =
-    request
-      .header(Header.Cookie)
-      .flatMap(_.value.find(_.name == signInCookieName))
-      .flatMap(_.unSign(cookieSignKey))
-      .filter(_.content.nonEmpty)
-      .flatMap { c =>
-        try Some(new String(Base64.getUrlDecoder.decode(c.content), StandardCharsets.UTF_8))
-        catch {
-          case NonFatal(_) => None
-        }
+    getCookieContent(request, signInCookieName).flatMap { content =>
+      try Some(new String(Base64.getUrlDecoder.decode(content), StandardCharsets.UTF_8))
+      catch {
+        case NonFatal(_) => None
       }
+    }
 
   override val sessionInvalidationCookie: Cookie.Response =
     Cookie
@@ -118,6 +121,24 @@ final class SessionManagerLive(cookieSignKey: CookieSignKey, identityProvider: I
         path = Some(Path.root),
       )
       .sign(cookieSignKey)
+
+  override def authMiddleware: HttpAppMiddleware.WithOut[Nothing, Any, Nothing, Throwable, λ[Env => Env & User], λ[A => Throwable]] =
+    sessionCookieMiddleware[User](session =>
+      try {
+        val idToken = IdToken.decode(session.idToken)
+        Right(User(firstName = idToken.firstName, lastName = idToken.lastName, email = idToken.email))
+      } catch {
+        case NonFatal(e) => Left(e)
+      }
+    )
+
+  private def getCookieContent(request: Request, cookieName: String): Option[String] =
+    request
+      .header(Header.Cookie)
+      .flatMap(_.value.find(_.name == cookieName))
+      .flatMap(_.unSign(cookieSignKey))
+      .filter(_.content.nonEmpty)
+      .map(_.content)
 
   private def sessionCookieMiddleware[Context: zio.Tag](
     extractContext: SessionCookieContent => Either[Throwable, Context]
@@ -135,19 +156,11 @@ final class SessionManagerLive(cookieSignKey: CookieSignKey, identityProvider: I
 
         Http.fromHttpZIO { request =>
           ZIO.suspendSucceed {
-            request
-              .header(Header.Cookie)
-              .flatMap(_.value.find(_.name == sessionCookieName))
-              .map(
-                _.unSign(cookieSignKey)
-                  .filter(_.content.nonEmpty)
-                  .toRight("Invalid cookie signature")
-                  .flatMap(cookie => SessionCookieContent.decode(cookie.content))
-              ) match {
+            getCookieContent(request, sessionCookieName)
+              .toRight("Missing or invalid session cookie")
+              .flatMap(content => SessionCookieContent.decode(content)) match {
 
-              case None => ZIO.succeed(Http.fromHandler(Handler.forbidden("Missing session cookie")))
-
-              case Some(Left(e)) =>
+              case Left(e) =>
                 ZIO
                   .logError(s"Invalid session cookie: $e")
                   .as(
@@ -158,7 +171,7 @@ final class SessionManagerLive(cookieSignKey: CookieSignKey, identityProvider: I
                     )
                   )
 
-              case Some(Right(session)) =>
+              case Right(session) =>
                 val sessionStillValid = Instant.now().isBefore(session.expiresAt)
 
                 if (sessionStillValid) {
@@ -223,21 +236,4 @@ final class SessionManagerLive(cookieSignKey: CookieSignKey, identityProvider: I
       }
     }
 
-  // TODO Jules: https://kinde.com/docs/build/about-id-tokens/
-  final case class IdToken(firstName: String, lastName: String, email: String)
-  object IdToken {
-    // TODO Jules
-    @nowarn
-    def decode(s: String): IdToken = IdToken(firstName = "Toto", lastName = "Tata", email = "toto@example.com")
-  }
-
-  override def authMiddleware: HttpAppMiddleware.WithOut[Nothing, Any, Nothing, Throwable, λ[Env => Env & User], λ[A => Throwable]] =
-    sessionCookieMiddleware[User](session =>
-      try {
-        val idToken = IdToken.decode(session.idToken)
-        Right(User(firstName = idToken.firstName, lastName = idToken.lastName, email = idToken.email))
-      } catch {
-        case NonFatal(e) => Left(e)
-      }
-    )
 }

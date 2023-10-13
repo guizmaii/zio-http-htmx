@@ -73,6 +73,28 @@ object IdToken                                                                  
     }
 }
 
+final case class SignInCookieContent(expiresAt: Instant, state: String)
+object SignInCookieContent {
+  implicit private val codec: JsonCodec[SignInCookieContent] = DeriveJsonCodec.gen[SignInCookieContent]
+
+  def make(state: String): SignInCookieContent =
+    SignInCookieContent(
+      expiresAt = Instant.now().plusSeconds(3600), // 1 hour of validity
+      state = state,
+    )
+
+  // TODO: Needs encryption
+  def encode(signInCookieContent: SignInCookieContent): String =
+    new String(Base64.getUrlEncoder.encode(signInCookieContent.toJson.getBytes(StandardCharsets.UTF_8)), StandardCharsets.UTF_8)
+
+  // TODO: Needs encryption
+  def decode(s: String): Either[String, SignInCookieContent] =
+    try new String(Base64.getUrlDecoder.decode(s), StandardCharsets.UTF_8).fromJson[SignInCookieContent]
+    catch {
+      case NonFatal(_) => Left("Invalid cookie encoding")
+    }
+}
+
 @nowarn("cat=scala3-migration")
 final case class SessionCookieContent private (expiresAt: Instant, refreshToken: String, loggedUser: LoggedUser)
 object SessionCookieContent {
@@ -89,7 +111,7 @@ object SessionCookieContent {
 
   // TODO: Needs encryption
   def encode(sessionCookieContent: SessionCookieContent): String =
-    Base64.getUrlEncoder.encodeToString(sessionCookieContent.toJson.getBytes(StandardCharsets.UTF_8))
+    new String(Base64.getUrlEncoder.encode(sessionCookieContent.toJson.getBytes(StandardCharsets.UTF_8)), StandardCharsets.UTF_8)
 
   // TODO: Needs decryption
   def decode(s: String): Either[String, SessionCookieContent] =
@@ -132,8 +154,7 @@ final class SessionManagerLive(cookieSignKey: CookieSignKey, identityProvider: I
     Cookie
       .Response(
         name = signInCookieName,
-        // TODO: Sign in cookie content should contains expiration date and should be validated to avoid replay attacks
-        content = Base64.getUrlEncoder.encodeToString(state.getBytes(StandardCharsets.UTF_8)),
+        content = SignInCookieContent.encode(SignInCookieContent.make(state)),
         maxAge = Some(1.hour), // This cookie is valid only 1h
         isSecure = false,      // TODO: should be `true` in Staging and Prod
         isHttpOnly = true,
@@ -172,9 +193,11 @@ final class SessionManagerLive(cookieSignKey: CookieSignKey, identityProvider: I
 
   override def getSignInState(request: Request): Option[String] =
     getCookieContent(request, signInCookieName).flatMap { content =>
-      try Some(new String(Base64.getUrlDecoder.decode(content), StandardCharsets.UTF_8))
-      catch {
-        case NonFatal(_) => None
+      SignInCookieContent.decode(content) match {
+        case Left(_)                                      => None
+        case Right(SignInCookieContent(expiresAt, state)) =>
+          val notExpired = Instant.now().isBefore(expiresAt)
+          if (notExpired) Some(state) else None
       }
     }
 

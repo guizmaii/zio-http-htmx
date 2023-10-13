@@ -1,5 +1,6 @@
 package com.guizmaii.zio.htmx
 
+import com.guizmaii.zio.htmx.persistence.SessionStorage
 import com.guizmaii.zio.htmx.services.{IdentityProvider, KindeConfig, SessionManager, UsersService}
 import zio.*
 import zio.http.*
@@ -77,5 +78,6 @@ object Main extends ZIOAppDefault {
       IdentityProvider.kinde,
       Client.default,
       SessionManager.live,
+      SessionStorage.inMemory,
     )
 }

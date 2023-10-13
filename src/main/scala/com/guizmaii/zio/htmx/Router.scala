@@ -12,15 +12,19 @@ object Router {
       case req @ Method.GET -> Root     =>
         ZIO.serviceWithZIO[SessionManager] { sessionManager =>
           req.url.queryParams.get("search").flatMap(_.headOption).map(_.trim) match {
-            case None         => ZIO.succeed(Response.twirl(views.html.index(sessionManager.loggedUser(req))()))
+            case None         =>
+              for {
+                maybeLoggedUser <- sessionManager.loggedUser(req)
+              } yield Response.twirl(views.html.index(maybeLoggedUser)())
             case Some(filter) =>
               for {
-                users <- ZIO.serviceWith[UsersService](_.find(filter))
+                users           <- ZIO.serviceWith[UsersService](_.find(filter))
+                maybeLoggedUser <- sessionManager.loggedUser(req)
               } yield
                 if (req.hasHeader("HX-Request")) Response.twirl(partials.html.users_table_body(users))
                 else
                   Response.twirl(
-                    views.html.index(loggedUser = sessionManager.loggedUser(req))(searchValue = Some(filter), users = Some(users))
+                    views.html.index(maybeLoggedUser)(searchValue = Some(filter), users = Some(users))
                   )
           }
         }

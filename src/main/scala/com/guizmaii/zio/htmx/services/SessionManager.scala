@@ -13,12 +13,58 @@ import java.util.Base64
 import scala.annotation.nowarn
 import scala.util.control.NonFatal
 
-// TODO Jules: https://kinde.com/docs/build/about-id-tokens/
-final case class IdToken(firstName: String, lastName: String, email: String)
-object IdToken {
+/**
+ * Raw id_token from Kinde contains:
+ * {{{
+ *  {
+ *    "at_hash": "sWoDGICu3YcYX9_tC0QIdE",
+ *    "aud": [
+ *      "https://<my-app>.kinde.com",
+ *      "844e057836fd4e1fbb2c92507c58add2"
+ *    ],
+ *    "auth_time": 1697184156,
+ *    "azp": "844e057836fd4e1fbb2c92507c58add2",
+ *    "email": "jules.ivanic@gmail.com",
+ *    "exp": 1697187756,
+ *    "family_name": "Ivanic",
+ *    "given_name": "Jules",
+ *    "iat": 1697185641,
+ *    "iss": "https://<my-app>.kinde.com",
+ *    "jti": "e341aa0d-407a-4689-980a-039d14d0b3fb",
+ *    "name": "Jules Ivanic",
+ *    "org_codes": [
+ *      "org_576a383bb64"
+ *    ],
+ *    "picture": "https://avatars.githubusercontent.com/u/1193670?v=4",
+ *    "sub": "kp_0c6149688c8ded448a8dbe0aed4c6bac",
+ *    "updated_at": 1697125145
+ * }
+ * }}}
+ *
+ * See also: https://kinde.com/docs/build/about-id-tokens/
+ *
+ * Additional info:
+ *  - `picture` can be `null` according to the TS SDK
+ *  - `sub` is the user ID
+ */
+final case class IdToken(sub: String, given_name: String, family_name: String, name: String, email: String, picture: Option[String]) {
+  @inline def id: String        = sub
+  @inline def firstName: String = given_name
+  @inline def lastName: String  = family_name
+  @inline def fullName: String  = name
+}
+object IdToken                                                                                                                       {
   // TODO Jules
   @nowarn
-  def decode(s: String): IdToken = IdToken(firstName = "Toto", lastName = "Tata", email = "toto@example.com")
+  def decode(s: String): IdToken =
+    IdToken(
+      sub = "kp_0c6149688c8ded448a8dbe0aed4c6bac",
+      given_name = "Jules",
+      family_name = "Ivanic",
+      name = "Jules Ivanic",
+      email = "jules.ivanic@example.com",
+      picture = Some("https://avatars.githubusercontent.com/u/1193670?v=4"),
+    )
 }
 
 final case class SessionCookieContent(expiresAt: Instant, refreshToken: String, idToken: String)

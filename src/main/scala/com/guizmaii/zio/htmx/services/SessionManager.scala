@@ -63,8 +63,8 @@ object SessionManager {
 
 //noinspection NonAsciiCharacters
 final class SessionManagerLive(cookieSignKey: CookieSignKey, identityProvider: IdentityProvider) extends SessionManager {
-  private val signInCookieName: String = "HTMX_SIGN_IN"
-  private val sessionCookieName        = "HTMX_SESSION"
+  private val signInCookieName: "HTMX_SIGN_IN"  = "HTMX_SIGN_IN"
+  private val sessionCookieName: "HTMX_SESSION" = "HTMX_SESSION"
 
   override def signInCookie(state: String): Cookie.Response =
     Cookie

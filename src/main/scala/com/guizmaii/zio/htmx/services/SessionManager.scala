@@ -1,15 +1,16 @@
 package com.guizmaii.zio.htmx.services
 
 import com.guizmaii.zio.htmx.AppConfig
-import com.guizmaii.zio.htmx.domain.User
+import com.guizmaii.zio.htmx.domain.LoggedUser
 import com.guizmaii.zio.htmx.types.CookieSignKey
 import zio.http.*
 import zio.json.{DecoderOps, DeriveJsonCodec, EncoderOps, JsonCodec}
-import zio.{Cause, Duration, Trace, URLayer, ZEnvironment, ZIO, ZLayer, durationInt, durationLong}
+import zio.{Duration, Trace, URLayer, ZEnvironment, ZIO, ZLayer, durationInt, durationLong}
 
 import java.nio.charset.StandardCharsets
 import java.time.Instant
 import java.util.Base64
+import java.util.regex.Pattern
 import scala.annotation.nowarn
 import scala.util.control.NonFatal
 
@@ -48,28 +49,43 @@ import scala.util.control.NonFatal
  *  - `sub` is the user ID
  */
 final case class IdToken(sub: String, given_name: String, family_name: String, name: String, email: String, picture: Option[String]) {
-  @inline def id: String        = sub
+  @inline def userId: String    = sub
   @inline def firstName: String = given_name
   @inline def lastName: String  = family_name
   @inline def fullName: String  = name
 }
 object IdToken                                                                                                                       {
-  // TODO Jules
-  @nowarn
-  def decode(s: String): IdToken =
-    IdToken(
-      sub = "kp_0c6149688c8ded448a8dbe0aed4c6bac",
-      given_name = "Jules",
-      family_name = "Ivanic",
-      name = "Jules Ivanic",
-      email = "jules.ivanic@example.com",
-      picture = Some("https://avatars.githubusercontent.com/u/1193670?v=4"),
-    )
+  implicit val decoder: JsonCodec[IdToken] = DeriveJsonCodec.gen[IdToken]
+
+  /**
+   * Split a string on the `.` character
+   */
+  private val headerRegex: Pattern = Pattern.compile("\\.")
+
+  def decode(raw: String): Either[String, IdToken] =
+    headerRegex.split(raw, 3) match {
+      case Array(_, claims, _) =>
+        try new String(Base64.getUrlDecoder.decode(claims.getBytes(StandardCharsets.UTF_8)), StandardCharsets.UTF_8).fromJson[IdToken]
+        catch {
+          case NonFatal(_) => Left("Invalid id_token: Unable to decode claims")
+        }
+      case _                   => Left("Invalid id_token: Token does not match the correct pattern")
+    }
 }
 
-final case class SessionCookieContent(expiresAt: Instant, refreshToken: String, idToken: String)
+@nowarn("cat=scala3-migration")
+final case class SessionCookieContent private (expiresAt: Instant, refreshToken: String, loggedUser: LoggedUser)
 object SessionCookieContent {
   implicit private val codec: JsonCodec[SessionCookieContent] = DeriveJsonCodec.gen[SessionCookieContent]
+
+  def from(codeTokenResponse: CodeTokenResponse): Either[String, SessionCookieContent] =
+    IdToken.decode(codeTokenResponse.idToken).map { idToken =>
+      SessionCookieContent(
+        expiresAt = Instant.now().plusSeconds(codeTokenResponse.expiresIn),
+        refreshToken = codeTokenResponse.refreshToken,
+        loggedUser = LoggedUser.from(idToken),
+      )
+    }
 
   // TODO: Needs encryption
   def encode(sessionCookieContent: SessionCookieContent): String =
@@ -92,9 +108,9 @@ trait SessionManager {
   def newSessionCookie(newSession: SessionCookieContent, expiresIn: Duration): Cookie.Response
   def sessionInvalidationCookie: Cookie.Response
 
-  def authMiddleware: HttpAppMiddleware.WithOut[Nothing, Any, Nothing, Throwable, λ[Env => Env & User], λ[A => Throwable]]
+  def authMiddleware: HttpAppMiddleware.WithOut[Nothing, Any, Nothing, Throwable, λ[Env => Env & LoggedUser], λ[A => Throwable]]
 
-  def loggedUser(request: Request): Option[User]
+  def loggedUser(request: Request): Option[LoggedUser]
 }
 
 object SessionManager {
@@ -116,13 +132,14 @@ final class SessionManagerLive(cookieSignKey: CookieSignKey, identityProvider: I
     Cookie
       .Response(
         name = signInCookieName,
+        // TODO: Sign in cookie content should contains expiration date and should be validated to avoid replay attacks
         content = Base64.getUrlEncoder.encodeToString(state.getBytes(StandardCharsets.UTF_8)),
         maxAge = Some(1.hour), // This cookie is valid only 1h
         isSecure = false,      // TODO: should be `true` in Staging and Prod
         isHttpOnly = true,
         // Needs to be Lax otherwise the cookie isn't included in the `/auth/callback` request coming from Kinde
         sameSite = Some(Cookie.SameSite.Lax),
-        path = Some(Path.root),
+        path = Some(Path.root),// TODO: Should be `/auth`?
       )
       .sign(cookieSignKey)
 
@@ -174,53 +191,17 @@ final class SessionManagerLive(cookieSignKey: CookieSignKey, identityProvider: I
       )
       .sign(cookieSignKey)
 
-  override def authMiddleware: HttpAppMiddleware.WithOut[Nothing, Any, Nothing, Throwable, λ[Env => Env & User], λ[A => Throwable]] =
-    sessionCookieMiddleware[User](session =>
-      try {
-        val idToken = IdToken.decode(session.idToken)
-        Right(User(firstName = idToken.firstName, lastName = idToken.lastName, email = idToken.email))
-      } catch {
-        case NonFatal(e) => Left(e)
-      }
-    )
-
-  override def loggedUser(request: Request): Option[User] =
-    getCookieContent(request, sessionCookieName)
-      .flatMap(content =>
-        SessionCookieContent.decode(content) match {
-          case Left(_)        => None
-          case Right(session) =>
-            // TODO Jules: "refresh token" part is missing
-            try {
-              val idToken = IdToken.decode(session.idToken)
-              Some(User(firstName = idToken.firstName, lastName = idToken.lastName, email = idToken.email))
-            } catch {
-              case NonFatal(_) => None
-            }
-        }
-      )
-
-  private def getCookieContent(request: Request, cookieName: String): Option[String] =
-    request
-      .header(Header.Cookie)
-      .flatMap(_.value.find(_.name == cookieName))
-      .flatMap(_.unSign(cookieSignKey))
-      .filter(_.content.nonEmpty)
-      .map(_.content)
-
-  private def sessionCookieMiddleware[Context: zio.Tag](
-    extractContext: SessionCookieContent => Either[Throwable, Context]
-  ): HttpAppMiddleware.WithOut[Nothing, Any, Nothing, Throwable, λ[Env => Env & Context], λ[A => Throwable]] =
+  override val authMiddleware: HttpAppMiddleware.WithOut[Nothing, Any, Nothing, Throwable, λ[Env => Env & LoggedUser], λ[A => Throwable]] =
     new HttpAppMiddleware.Contextual[Nothing, Any, Nothing, Throwable] {
-      type OutEnv[Env] = Env & Context
+      type OutEnv[Env] = Env & LoggedUser
       type OutErr[_]   = Throwable
 
       override def apply[Env, Err <: Throwable](
         http: Http[Env, Err, Request, Response]
-      )(implicit trace: Trace): Http[Env & Context, Throwable, Request, Response] = {
+      )(implicit trace: Trace): Http[Env & LoggedUser, Throwable, Request, Response] = {
 
-        def providedHttp(context: Context): Http[Env & Context, Err, Request, Response] =
-          http.provideSomeEnvironment[Env](_.union[Context](ZEnvironment(context)))
+        def providedHttp(context: LoggedUser): Http[Env & LoggedUser, Err, Request, Response] =
+          http.provideSomeEnvironment[Env](_.union[LoggedUser](ZEnvironment(context)))
 
         Http.fromHttpZIO { request =>
           ZIO.suspendSucceed {
@@ -241,58 +222,35 @@ final class SessionManagerLive(cookieSignKey: CookieSignKey, identityProvider: I
 
               case Right(session) =>
                 val sessionStillValid = Instant.now().isBefore(session.expiresAt)
-
-                if (sessionStillValid) {
-                  extractContext(session) match {
-                    case Right(context) => ZIO.succeed(providedHttp(context))
-                    case Left(error)    =>
-                      ZIO.logErrorCause("Error while extracting the context from the session cookie", Cause.fail(error)) *>
-                        ZIO.succeed(
-                          Http.fromHandler(
-                            Handler.response(
-                              // TODO: Is `Unauthorized` appropriate here?
-                              // TODO: Should we really wipe the session cookie here?
-                              Response.status(Status.Unauthorized).addCookie(sessionInvalidationCookie)
-                            )
-                          )
-                        )
-                  }
-                } else {
+                if (sessionStillValid) ZIO.succeed(providedHttp(session.loggedUser))
+                else {
                   (
                     for {
-                      response  <- identityProvider.refreshTokens(session.refreshToken)
-                      newSession = SessionCookieContent(
-                                     expiresAt = Instant.now().plusSeconds(response.expiresIn),
-                                     refreshToken = response.refreshToken,
-                                     idToken = response.idToken,
-                                   )
-                      r         <- extractContext(newSession) match {
-                                     case Right(context) =>
-                                       ZIO.succeed {
-                                         providedHttp(context).map(
-                                           _.addCookie(newSessionCookie(newSession, response.expiresIn.seconds))
-                                         )
-                                       }
-                                     case Left(error)    =>
-                                       ZIO.logErrorCause("Error while extracting the context from the session cookie", Cause.fail(error)) *>
-                                         ZIO.succeed {
-                                           Http.fromHandler(
-                                             Handler.response(
-                                               // TODO: Is `Unauthorized` appropriate here?
-                                               // TODO: Should we really wipe the session cookie here?
-                                               Response.status(Status.Unauthorized).addCookie(sessionInvalidationCookie)
-                                             )
-                                           )
-                                         }
-                                   }
+                      response <- identityProvider.refreshTokens(session.refreshToken)
+                      r        <- ZIO.suspendSucceed {
+                                    SessionCookieContent.from(response) match {
+                                      case Right(newSession) =>
+                                        val newCookie  = newSessionCookie(newSession, response.expiresIn.seconds)
+                                        val loggedUser = newSession.loggedUser
+
+                                        ZIO.succeed(providedHttp(loggedUser).map(_.addCookie(newCookie)))
+                                      case Left(e)           =>
+                                        ZIO.logError(s"Error while decoding the new session cookie: $e") *>
+                                          ZIO.fail(e)
+                                    }
+                                  }
                     } yield r
                   ).logError("Error while refreshing the tokens")
                     .catchAll(_ =>
                       ZIO.succeed {
+                        val (signInUri, state) = identityProvider.getSignInUrl
+
                         Http.fromHandler(
                           Handler.response(
-                            // TODO: /sign-in URL isn't the correct one here
-                            Response.redirect(URL.root.withPath("/sign-in")).addCookie(sessionInvalidationCookie)
+                            Response
+                              .redirect(signInUri)
+                              .addCookie(sessionInvalidationCookie)
+                              .addCookie(signInCookie(state))
                           )
                         )
                       }
@@ -303,5 +261,24 @@ final class SessionManagerLive(cookieSignKey: CookieSignKey, identityProvider: I
         }
       }
     }
+
+  override def loggedUser(request: Request): Option[LoggedUser] =
+    getCookieContent(request, sessionCookieName)
+      .flatMap(content =>
+        SessionCookieContent.decode(content) match {
+          case Left(_)        => None
+          case Right(session) =>
+            // TODO Jules: "refresh token" part is missing
+            Some(session.loggedUser)
+        }
+      )
+
+  private def getCookieContent(request: Request, cookieName: String): Option[String] =
+    request
+      .header(Header.Cookie)
+      .flatMap(_.value.find(_.name == cookieName))
+      .flatMap(_.unSign(cookieSignKey))
+      .filter(_.content.nonEmpty)
+      .map(_.content)
 
 }

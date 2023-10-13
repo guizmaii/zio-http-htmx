@@ -191,14 +191,14 @@ final class Kinde(config: KindeConfig, client: ZEnvironment[Client], secureRando
         raw      <- if (response.status.isSuccess) response.body.asString
                     else {
                       response.body.asString.flatMap { body =>
-                        val error = s"Error while refreshing a token: ${response.status.code} - ${response.headers.toString()} - $body"
+                        val error = s"Error while refreshing the tokens: ${response.status.code} - ${response.headers.toString()} - $body"
                         ZIO.logDebug(error) *> ZIO.fail(new RuntimeException(error))
                       }
                     }
         _        <- ZIO.logDebug(s"Raw `refresh_token` response from Kinde - $raw")
         parsed   <- ZIO.fromEither(raw.fromJson[CodeTokenResponse].leftMap(new RuntimeException(_)))
       } yield parsed
-    ).logError("Error while refreshing a token")
+    ).logError("Error while refreshing the tokens")
       .provideEnvironment(client)
 
   override val logoutUrl: URL =

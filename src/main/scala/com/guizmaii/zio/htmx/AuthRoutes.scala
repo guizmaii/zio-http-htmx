@@ -4,8 +4,6 @@ import com.guizmaii.zio.htmx.services.{IdentityProvider, SessionCookieContent, S
 import zio.http.*
 import zio.{ZIO, durationLong}
 
-import java.time.Instant
-
 object AuthRoutes {
 
   /**
@@ -30,12 +28,8 @@ object AuthRoutes {
                               case (Some(code), Some(savedState), Some(state)) if savedState == state =>
                                 (
                                   for {
-                                    response  <- ZIO.serviceWithZIO[IdentityProvider](_.handleSignIn(code))
-                                    newSession = SessionCookieContent(
-                                                   expiresAt = Instant.now().plusSeconds(response.expiresIn),
-                                                   refreshToken = response.refreshToken,
-                                                   idToken = response.idToken,
-                                                 )
+                                    response   <- ZIO.serviceWithZIO[IdentityProvider](_.handleSignIn(code))
+                                    newSession <- ZIO.fromEither(SessionCookieContent.from(response))
                                   } yield
                                   // TODO Jules: For now, we always redirect to `/`, do we want/need to redirect somewhere else?
                                   Response

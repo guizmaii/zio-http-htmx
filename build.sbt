@@ -38,6 +38,6 @@ lazy val root =
     .settings(reLogTag := "zio-http-htmx")
     .settings(
       name := "zio-http-htmx",
-      libraryDependencies ++= Seq(zioHttp) ++ loggingRuntime ++ zioConfig,
+      libraryDependencies ++= Seq(zioHttp, zioJson) ++ loggingRuntime ++ zioConfig,
       testFrameworks += new TestFramework("zio.test.sbt.ZTestFramework"),
     )

@@ -1,6 +1,6 @@
-@import com.guizmaii.zio.htmx.domain.User
+@import com.guizmaii.zio.htmx.domain.{LoggedUser, User}
 
-@(loggedUser: Option[User] = None)(searchValue: Option[String] = None, users: Option[List[User]] = None)
+@(loggedUser: Option[LoggedUser] = None)(searchValue: Option[String] = None, users: Option[List[User]] = None)
 
 @main {
     <h1>Hello @loggedUser.map(_.firstName).getOrElse("htmx")</h1>

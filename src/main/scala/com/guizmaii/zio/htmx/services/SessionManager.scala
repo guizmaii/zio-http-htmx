@@ -6,8 +6,8 @@ import com.guizmaii.zio.htmx.persistence.{Session, SessionStorage}
 import com.guizmaii.zio.htmx.types.CookieSignKey
 import zio.http.*
 import zio.json.{DecoderOps, DeriveJsonCodec, EncoderOps, JsonCodec}
-import zio.prelude.{BicovariantOps, ForEachOps}
-import zio.{Cause, Duration, Random, Task, Trace, UIO, URLayer, ZEnvironment, ZIO, ZLayer, durationInt, durationLong}
+import zio.prelude.ForEachOps
+import zio.{Cause, Duration, Random, Schedule, Task, Trace, UIO, URLayer, ZEnvironment, ZIO, ZLayer, durationInt, durationLong}
 
 import java.nio.charset.StandardCharsets
 import java.time.Instant
@@ -105,17 +105,12 @@ object SessionState {
 
 //noinspection NonAsciiCharacters
 trait SessionManager {
-  def newSignInSession(state: String): Task[Cookie.Response]
-  def invalidateSignInSession(id: UUID): Task[Cookie.Response]
-  def invalidateSignInSession(request: Request): Task[Cookie.Response]
-  def getSignInState(request: Request): Task[Option[(UUID, String)]]
-
-  def newSession(codeTokenResponse: CodeTokenResponse): Task[Cookie.Response]
-  def invalidateSession(sessionId: UUID): Task[Cookie.Response]
+  def signInUrl: Task[(URL, Cookie.Response)]
+  def logoutUrl(request: Request): UIO[(URL, Cookie.Response, Cookie.Response)]
+  def newUserSession(request: Request): Task[(Cookie.Response, Cookie.Response)]
+  def loggedUser(request: Request): UIO[Option[LoggedUser]]
 
   def authMiddleware: HttpAppMiddleware.WithOut[Nothing, Any, Nothing, Throwable, λ[Env => Env & LoggedUser], λ[A => Throwable]]
-
-  def loggedUser(request: Request): UIO[Option[LoggedUser]]
 }
 
 object SessionManager {
@@ -137,8 +132,8 @@ final class SessionManagerLive(
   sessionStorage: SessionStorage,
   random: Random,
 ) extends SessionManager {
-  private val signInCookieName: "HTMX_SIGN_IN"  = "HTMX_SIGN_IN"
-  private val sessionCookieName: "HTMX_SESSION" = "HTMX_SESSION"
+  private val signInCookieName: "HTMX_SIGN_IN"      = "HTMX_SIGN_IN"
+  private val userSessionCookieName: "HTMX_SESSION" = "HTMX_SESSION"
 
   private val signInSessionInvalidationCookie: Cookie.Response =
     Cookie
@@ -153,10 +148,10 @@ final class SessionManagerLive(
       )
       .sign(cookieSignKey)
 
-  private val sessionInvalidationCookie: Cookie.Response =
+  private val userSessionInvalidationCookie: Cookie.Response =
     Cookie
       .Response(
-        name = sessionCookieName,
+        name = userSessionCookieName,
         content = "",
         maxAge = Some(Duration.Zero), // expires the session cookie
         isSecure = false,             // TODO: should be `true` in Staging and Prod
@@ -166,79 +161,94 @@ final class SessionManagerLive(
       )
       .sign(cookieSignKey)
 
-  override def newSignInSession(state: String): Task[Cookie.Response] =
+  override def signInUrl: Task[(URL, Cookie.Response)] =
     (
       for {
-        sessionId <- random.nextUUID
-        _         <- sessionStorage.store(sessionId, Session.make(state, 1.hour))
-      } yield Cookie
-        .Response(
-          name = signInCookieName,
-          content = sessionId.toString,
-          maxAge = Some(1.hour), // This cookie is valid only 1h
-          isSecure = false,      // TODO: should be `true` in Staging and Prod
-          isHttpOnly = true,
-          // Needs to be Lax otherwise the cookie isn't included in the `/auth/callback` request coming from Kinde
-          sameSite = Some(Cookie.SameSite.Lax),
-          path = Some(Path.root / "auth"),
-        )
-        .sign(cookieSignKey)
+        (signInUrl, state)  <- ZIO.succeed(identityProvider.getSignInUrl)
+        signInSessionCookie <- newSignInSession(state)
+      } yield (signInUrl, signInSessionCookie)
     ).logError("Error while creating the sign-in session")
 
-  override def invalidateSignInSession(id: UUID): Task[Cookie.Response] =
-    sessionStorage
-      .invalidate(id)
-      .logError("Error while invalidating the sign-in session")
-      .as(signInSessionInvalidationCookie)
+  override def logoutUrl(request: Request): UIO[(URL, Cookie.Response, Cookie.Response)] =
+    for {
+      signInSessionInvalidationCookie <- invalidateSignInSession(request)
+      userSessionInvalidationCookie   <- invalidateUserSession(request)
+    } yield (identityProvider.logoutUrl, signInSessionInvalidationCookie, userSessionInvalidationCookie)
 
-  override def invalidateSignInSession(request: Request): Task[Cookie.Response] =
-    getSessionId(request, signInCookieName) match {
-      case None     => ZIO.succeed(signInSessionInvalidationCookie)
-      case Some(id) => invalidateSignInSession(id)
-    }
-
-  override def getSignInState(request: Request): Task[Option[(UUID, String)]] =
-    ZIO
-      .suspendSucceed {
-        getSessionId(request, signInCookieName) match {
-          case None     => ZIO.none
-          case Some(id) =>
-            sessionStorage.get(id).flatMap {
-              case None          => ZIO.none
-              case Some(session) =>
-                if (session.notExpired(Instant.now())) ZIO.some((id, session.content))
-                else sessionStorage.invalidate(id).as(None)
-            }
+  override def newUserSession(request: Request): Task[(Cookie.Response, Cookie.Response)] = {
+    def signInState(request: Request): UIO[Option[String]] =
+      ZIO
+        .suspendSucceed {
+          sessionId(request, signInCookieName) match {
+            case None     => ZIO.none
+            case Some(id) =>
+              sessionStorage
+                .get(id)
+                .retry(Schedule.fixed(100.millis) && Schedule.recurs(3).unit)
+                .foldZIO(
+                  failure = e =>
+                    ZIO
+                      .logFatalCause("Failed to get the sign-in session from the storage", Cause.fail(e))
+                      .as(None),
+                  success = {
+                    case None          => ZIO.none
+                    case Some(session) =>
+                      if (session.notExpired(Instant.now())) ZIO.some(session.content)
+                      else {
+                        // We can ignore here as the session cookie will be wiped out anyway
+                        sessionStorage.invalidate(id).ignore.as(None)
+                      }
+                  },
+                )
+          }
         }
-      }
-      .logError("Error while retrieving the sign-in state")
 
-  override def newSession(codeTokenResponse: CodeTokenResponse): Task[Cookie.Response] =
-    (
-      for {
-        session   <- ZIO.fromEither(SessionCookieContent.from(codeTokenResponse).leftMap(new RuntimeException(_)))
-        sessionId <- random.nextUUID
-        expiresIn  = codeTokenResponse.expiresIn.seconds
-        _         <- sessionStorage.store(sessionId, Session.make(session.toJson, expiresIn))
-      } yield Cookie
-        .Response(
-          name = sessionCookieName,
-          content = sessionId.toString,
-          maxAge = Some(expiresIn),
-          isSecure = false, // TODO: should be `true` in Staging and Prod
-          isHttpOnly = true,
-          // Needs to be Lax otherwise the cookie isn't included in `/` request coming from Kinde after login
-          sameSite = Some(Cookie.SameSite.Lax),
-          path = Some(Path.root),
-        )
-        .sign(cookieSignKey)
-    ).logError("Error while creating the session")
+    def newSession(codeTokenResponse: CodeTokenResponse): Task[Cookie.Response] =
+      (
+        for {
+          session   <- ZIO
+                         .fromEither(SessionCookieContent.from(codeTokenResponse))
+                         .flatMapError(e => ZIO.logFatal(s"Invalid code token response: $e").as(new RuntimeException(e)))
+          sessionId <- random.nextUUID
+          expiresIn  = codeTokenResponse.expiresIn.seconds
+          _         <- sessionStorage
+                         .store(sessionId, Session.make(session.toJson, expiresIn))
+                         .retry(Schedule.fixed(100.millis) && Schedule.recurs(3).unit)
+                         .tapErrorCause(e => ZIO.logFatalCause("Failed to store the user session in the session storage", Cause.fail(e)))
+        } yield Cookie
+          .Response(
+            name = userSessionCookieName,
+            content = sessionId.toString,
+            maxAge = Some(expiresIn),
+            isSecure = false, // TODO: should be `true` in Staging and Prod
+            isHttpOnly = true,
+            // Needs to be Lax otherwise the cookie isn't included in `/` request coming from Kinde after login
+            sameSite = Some(Cookie.SameSite.Lax),
+            path = Some(Path.root),
+          )
+          .sign(cookieSignKey)
+      ).logError("Error while creating the session")
 
-  override def invalidateSession(sessionId: UUID): Task[Cookie.Response] =
-    sessionStorage
-      .invalidate(sessionId)
-      .logError("Error while invalidating the session")
-      .as(sessionInvalidationCookie)
+    for {
+      maybeSavedState <- signInState(request)
+      maybeState       = request.url.queryParams.get("state").flatMap(_.headOption.filter(_.nonEmpty))
+      maybeCode        = request.url.queryParams.get("code").flatMap(_.headOption.filter(_.nonEmpty))
+      cookies         <- (maybeCode, maybeSavedState, maybeState) match {
+                           case (Some(code), Some(savedState), Some(state)) if savedState == state =>
+                             for {
+                               response                        <- identityProvider.handleSignIn(code)
+                               newSessionCookie                <- newSession(response)
+                               signInSessionInvalidationCookie <- invalidateSignInSession(request)
+                             } yield (newSessionCookie, signInSessionInvalidationCookie)
+                           case _                                                                  =>
+                             ZIO.fail(new RuntimeException("Invalid state")) // TODO Jules: can we do better?
+                         }
+    } yield cookies
+  }
+
+  // TODO: The invalidation of the session is missing here
+  override def loggedUser(request: Request): UIO[Option[LoggedUser]] =
+    getSessionContent(request).map(_.asSome(_.loggedUser))
 
   override val authMiddleware: HttpAppMiddleware.WithOut[Nothing, Any, Nothing, Throwable, λ[Env => Env & LoggedUser], λ[A => Throwable]] =
     new HttpAppMiddleware.Contextual[Nothing, Any, Nothing, Throwable] {
@@ -266,7 +276,7 @@ final class SessionManagerLive(
                     raw                  = Response.redirect(signInUri).addCookie(signInSessionCookie)
                     response             = (sessionState match {
                                              case SessionState.NoSession => raw
-                                             case SessionState.Expired   => raw.addCookie(sessionInvalidationCookie)
+                                             case SessionState.Expired   => raw.addCookie(userSessionInvalidationCookie)
                                            }): @nowarn("msg=match may not be exhaustive.")
                   } yield response
                 }
@@ -275,10 +285,6 @@ final class SessionManagerLive(
         }
       }
     }
-
-  // TODO: The invalidation of the session is missing here
-  override def loggedUser(request: Request): UIO[Option[LoggedUser]] =
-    getSessionContent(request).map(_.asSome(_.loggedUser))
 
   private def getSessionContent(request: Request): UIO[SessionState] = {
     def invalidateSession(id: UUID): UIO[SessionState.Expired.type] =
@@ -293,7 +299,7 @@ final class SessionManagerLive(
         )
 
     ZIO.suspendSucceed {
-      getSessionId(request, sessionCookieName) match {
+      sessionId(request, userSessionCookieName) match {
         case None     => ZIO.succeed(SessionState.NoSession)
         case Some(id) =>
           sessionStorage
@@ -329,11 +335,12 @@ final class SessionManagerLive(
                                   case Right(newSession) =>
                                     sessionStorage
                                       .store(id, Session.make(newSession.toJson, response.expiresIn.seconds))
+                                      .retry(Schedule.fixed(100.millis) && Schedule.recurs(3).unit)
                                       .foldZIO(
                                         success = _ => ZIO.succeed(SessionState.Valid(newSession)),
                                         failure = e =>
                                           ZIO
-                                            .logFatalCause("Failed to store user session", Cause.fail(e))
+                                            .logFatalCause("Failed to store the user session in the session storage", Cause.fail(e))
                                             .as(SessionState.Expired),
                                       )
                                   case Left(e)           =>
@@ -350,7 +357,54 @@ final class SessionManagerLive(
     }
   }
 
-  private def getSessionId(request: Request, cookieName: String): Option[UUID] =
+  private def newSignInSession(state: String): Task[Cookie.Response] =
+    (
+      for {
+        sessionId <- random.nextUUID
+        expiresIn  = 1.hour
+        _         <- sessionStorage
+                       .store(sessionId, Session.make(state, expiresIn))
+                       .retry(Schedule.fixed(100.millis) && Schedule.recurs(3).unit)
+                       .tapErrorCause(e => ZIO.logFatalCause("Failed to store the sign-in session in the session storage", Cause.fail(e)))
+      } yield Cookie
+        .Response(
+          name = signInCookieName,
+          content = sessionId.toString,
+          maxAge = Some(expiresIn), // This cookie is valid only 1h
+          isSecure = false,         // TODO: should be `true` in Staging and Prod
+          isHttpOnly = true,
+          // Needs to be Lax otherwise the cookie isn't included in the `/auth/callback` request coming from Kinde
+          sameSite = Some(Cookie.SameSite.Lax),
+          path = Some(Path.root / "auth"),
+        )
+        .sign(cookieSignKey)
+    ).logError("Error while creating the sign-in session")
+
+  /**
+   * That's not so important if the invalidation fails as the sign-in session only last 1 hours and as we'll remove the cookie containing the ID.
+   */
+  private def invalidateSignInSession(request: Request): UIO[Cookie.Response] =
+    invalidateSession(request, signInCookieName).as(signInSessionInvalidationCookie)
+
+  /**
+   * That's not so important if the invalidation fails as we'll remove the cookie containing the ID.
+   */
+  private def invalidateUserSession(request: Request): UIO[Cookie.Response] =
+    invalidateSession(request, userSessionCookieName).as(userSessionInvalidationCookie)
+
+  private def invalidateSession(request: Request, cookieName: String): UIO[Unit] =
+    ZIO.suspendSucceed {
+      sessionId(request, cookieName) match {
+        case None            => ZIO.unit
+        case Some(sessionId) =>
+          sessionStorage
+            .invalidate(sessionId)
+            .logError("Error while invalidating the session")
+            .ignore
+      }
+    }
+
+  private def sessionId(request: Request, cookieName: String): Option[UUID] =
     request
       .header(Header.Cookie)
       .flatMap(_.value.find(_.name == cookieName))

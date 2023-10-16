@@ -2,6 +2,7 @@ package com.guizmaii.zio.htmx.services
 
 import com.guizmaii.zio.htmx.types.NonEmptyString
 import com.guizmaii.zio.htmx.utils.Config.*
+import com.guizmaii.zio.htmx.utils.ShouldNeverHappen
 import zio.Config.Secret
 import zio.config.{ConfigDescriptor, ReadError, ZConfig}
 import zio.http.*
@@ -84,7 +85,10 @@ final class Kinde(config: KindeConfig, client: ZEnvironment[Client], secureRando
    */
   private val scopes: String     = "openid%20offline%20profile%20email"
   private val authUrl: String    = s"${config.domain}/oauth2/auth"
-  private val tokenUrl: URL      = URL.decode(s"${config.domain}/oauth2/token").fold(throw _, identity) // throw side should never happen
+  private val tokenUrl: URL      =
+    URL
+      .decode(s"${config.domain}/oauth2/token")
+      .fold(e => throw ShouldNeverHappen("Failed to make the Token URL", e), identity)
   private val clientSecret       = config.clientSecret.value.toArray.mkString
   private val encodedRedirectUri = URLEncoder.encode(config.callbackUrl, StandardCharsets.UTF_8)
 
@@ -111,7 +115,7 @@ final class Kinde(config: KindeConfig, client: ZEnvironment[Client], secureRando
       .decode(
         s"$authUrl?response_type=code&client_id=${config.clientId}&redirect_uri=$encodedRedirectUri&scope=$scopes&state=$state"
       )
-      .fold(throw _, _ -> state) // The throw part should never happen
+      .fold(e => throw ShouldNeverHappen("Failed to make sign-in URL", e), _ -> state)
   }
 
   /**
@@ -202,5 +206,7 @@ final class Kinde(config: KindeConfig, client: ZEnvironment[Client], secureRando
       .provideEnvironment(client)
 
   override val logoutUrl: URL =
-    URL.decode(s"${config.domain}/logout?redirect=${config.logoutRedirectUrl}").fold(throw _, identity) // throw side should never happen
+    URL
+      .decode(s"${config.domain}/logout?redirect=${config.logoutRedirectUrl}")
+      .fold(e => throw ShouldNeverHappen("Failed to make the logout URL", e), identity)
 }

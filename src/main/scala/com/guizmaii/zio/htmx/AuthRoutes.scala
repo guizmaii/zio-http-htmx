@@ -15,7 +15,7 @@ object AuthRoutes {
       case req @ Method.GET -> Root / "auth" / "sign-in" =>
         ZIO.serviceWithZIO[SessionManager] { sessionManager =>
           sessionManager.loggedUser(req).flatMap {
-            case Some(_) => ZIO.succeed(Response.ok)
+            case Some(_) => ZIO.succeed(Response.ok) // TODO Jules: Probably not the correct thing to answer with htmx
             case None    =>
               sessionManager.signInUrl
                 .foldZIO(

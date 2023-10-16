@@ -181,7 +181,6 @@ final class SessionManagerLive(
     } yield cookies
   }
 
-  // TODO: The invalidation of the session is missing here
   override def loggedUser(request: Request): UIO[Option[LoggedUser]] =
     getSessionContent(request).map(_.asSome(_.loggedUser))
 

@@ -186,7 +186,7 @@ final class SessionManagerLive(
   }
 
   override def loggedUser(request: Request): UIO[Option[LoggedUser]] =
-    getSessionContent(request).map(_.asSome(_.loggedUser))
+    userSessionState(request).map(_.asSome(_.loggedUser))
 
   override val authMiddleware: HttpAppMiddleware.WithOut[Nothing, Any, Nothing, Throwable, λ[Env => Env & LoggedUser], λ[A => Throwable]] =
     new HttpAppMiddleware.Contextual[Nothing, Any, Nothing, Throwable] {
@@ -201,21 +201,18 @@ final class SessionManagerLive(
           http.provideSomeEnvironment[Env](_.union[LoggedUser](ZEnvironment(context)))
 
         Http.fromHttpZIO { request =>
-          getSessionContent(request).map {
-            case SessionState.Valid(session)                                    => providedHttp(session.loggedUser)
-            case sessionState @ (SessionState.NoSession | SessionState.Expired) =>
+          userSessionState(request).map {
+            case SessionState.Valid(session)                   => providedHttp(session.loggedUser)
+            case SessionState.NoSession | SessionState.Expired =>
               Http.fromHandler {
                 Handler.responseZIO {
                   for {
                     (signInUri, state)  <- ZIO.succeed(identityProvider.getSignInUrl)
                     signInSessionCookie <- newSignInSession(state)
-                    // TODO: Would be nice to be redirected to the current page instead of `/` after the login
-                    raw                  = Response.redirect(signInUri).addCookie(signInSessionCookie)
-                    response             = (sessionState match {
-                                             case SessionState.NoSession => raw
-                                             case SessionState.Expired   => raw.addCookie(userSessionInvalidationCookie)
-                                           }): @nowarn("msg=match may not be exhaustive.")
-                  } yield response
+                  } yield Response
+                    .redirect(signInUri)
+                    .addCookie(signInSessionCookie)
+                    .addCookie(userSessionInvalidationCookie) // We always invalidate the user session cookie to be secure.
                 }
               }
           }
@@ -223,7 +220,7 @@ final class SessionManagerLive(
       }
     }
 
-  private def getSessionContent(request: Request): UIO[SessionState] = {
+  private def userSessionState(request: Request): UIO[SessionState] = {
     def invalidateSession(id: UUID): UIO[SessionState.Expired.type] =
       sessionStorage
         .invalidate(id)
@@ -255,7 +252,7 @@ final class SessionManagerLive(
                   ZIO.succeed(SessionState.Expired)
                 case Some(session) =>
                   session.content.fromJson[UserSessionContent] match {
-                    case Left(e)            =>
+                    case Left(e)                   =>
                       // TODO: There's a potential issue here as we might invalidate a "sign-in" session
                       ZIO.logError(s"Error while decoding the stored session cookie: $e") *>
                         invalidateSession(id)
@@ -268,10 +265,10 @@ final class SessionManagerLive(
                             failure = e =>
                               ZIO.logErrorCause("Error while refreshing the tokens", Cause.fail(e)) *>
                                 invalidateSession(id),
-                            success = response =>
+                            success = tokens =>
                               ZIO.suspendSucceed {
-                                val newUserSessionContent = UserSessionContent.from(response)
-                                val newUserSession        = Session.make(newUserSessionContent, response.expiresIn.seconds)
+                                val newUserSessionContent = UserSessionContent.from(tokens)
+                                val newUserSession        = Session.make(newUserSessionContent, tokens.expiresIn.seconds)
                                 sessionStorage
                                   .store(id, newUserSession)
                                   .retry(Schedule.fixed(100.millis) && Schedule.recurs(3).unit)

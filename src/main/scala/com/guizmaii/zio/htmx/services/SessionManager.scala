@@ -171,8 +171,8 @@ final class SessionManagerLive(
       cookies         <- (maybeCode, maybeSavedState, maybeState) match {
                            case (Some(code), Some(savedState), Some(state)) if savedState == state =>
                              for {
-                               response                        <- identityProvider.handleSignIn(code)
-                               newSessionCookie                <- newSession(response)
+                               tokens                          <- identityProvider.handleSignIn(code)
+                               newSessionCookie                <- newSession(tokens)
                                signInSessionInvalidationCookie <- invalidateSignInSession(request)
                              } yield (newSessionCookie, signInSessionInvalidationCookie)
                            case _                                                                  =>
@@ -204,8 +204,7 @@ final class SessionManagerLive(
               Http.fromHandler {
                 Handler.responseZIO {
                   for {
-                    _                   <- ZIO.unit
-                    (signInUri, state)   = identityProvider.getSignInUrl
+                    (signInUri, state)  <- ZIO.succeed(identityProvider.getSignInUrl)
                     signInSessionCookie <- newSignInSession(state)
                     // TODO: Would be nice to be redirected to the current page instead of `/` after the login
                     raw                  = Response.redirect(signInUri).addCookie(signInSessionCookie)

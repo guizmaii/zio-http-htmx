@@ -5,92 +5,29 @@ import com.guizmaii.zio.htmx.domain.LoggedUser
 import com.guizmaii.zio.htmx.persistence.{Session, SessionStorage}
 import com.guizmaii.zio.htmx.types.CookieSignKey
 import zio.http.*
-import zio.json.{DecoderOps, DeriveJsonCodec, EncoderOps, JsonCodec}
+import zio.json.{DecoderOps, DeriveJsonCodec, JsonCodec}
 import zio.prelude.ForEachOps
 import zio.{Cause, Duration, Random, Schedule, Task, Trace, UIO, URLayer, ZEnvironment, ZIO, ZLayer, durationInt, durationLong}
 
-import java.nio.charset.StandardCharsets
 import java.time.Instant
-import java.util.regex.Pattern
-import java.util.{Base64, UUID}
+import java.util.UUID
 import scala.annotation.nowarn
 import scala.util.control.NonFatal
 
-/**
- * Raw id_token from Kinde contains:
- * {{{
- *  {
- *    "at_hash": "sWoDGICu3YcYX9_tC0QIdE",
- *    "aud": [
- *      "https://<my-app>.kinde.com",
- *      "844e057836fd4e1fbb2c92507c58add2"
- *    ],
- *    "auth_time": 1697184156,
- *    "azp": "844e057836fd4e1fbb2c92507c58add2",
- *    "email": "jules.ivanic@gmail.com",
- *    "exp": 1697187756,
- *    "family_name": "Ivanic",
- *    "given_name": "Jules",
- *    "iat": 1697185641,
- *    "iss": "https://<my-app>.kinde.com",
- *    "jti": "e341aa0d-407a-4689-980a-039d14d0b3fb",
- *    "name": "Jules Ivanic",
- *    "org_codes": [
- *      "org_576a383bb64"
- *    ],
- *    "picture": "https://avatars.githubusercontent.com/u/1193670?v=4",
- *    "sub": "kp_0c6149688c8ded448a8dbe0aed4c6bac",
- *    "updated_at": 1697125145
- * }
- * }}}
- *
- * See also: https://kinde.com/docs/build/about-id-tokens/
- *
- * Additional info:
- *  - `picture` can be `null` according to the TS SDK
- *  - `sub` is the user ID
- */
-final case class IdToken(sub: String, given_name: String, family_name: String, name: String, email: String, picture: Option[String]) {
-  @inline def userId: String    = sub
-  @inline def firstName: String = given_name
-  @inline def lastName: String  = family_name
-  @inline def fullName: String  = name
-}
-object IdToken                                                                                                                       {
-  implicit val decoder: JsonCodec[IdToken] = DeriveJsonCodec.gen[IdToken]
-
-  /**
-   * Split a string on the `.` character
-   */
-  private val headerRegex: Pattern = Pattern.compile("\\.")
-
-  def decode(raw: String): Either[String, IdToken] =
-    headerRegex.split(raw, 3) match {
-      case Array(_, claims, _) =>
-        try new String(Base64.getUrlDecoder.decode(claims.getBytes(StandardCharsets.UTF_8)), StandardCharsets.UTF_8).fromJson[IdToken]
-        catch {
-          case NonFatal(_) => Left("Invalid id_token: Unable to decode claims")
-        }
-      case _                   => Left("Invalid id_token: Token does not match the correct pattern")
-    }
-}
-
 @nowarn("cat=scala3-migration")
-final case class SessionCookieContent private (refreshToken: String, loggedUser: LoggedUser)
-object SessionCookieContent {
-  implicit val codec: JsonCodec[SessionCookieContent] = DeriveJsonCodec.gen[SessionCookieContent]
+final case class UserSessionContent private (refreshToken: String, loggedUser: LoggedUser)
+object UserSessionContent {
+  implicit val codec: JsonCodec[UserSessionContent] = DeriveJsonCodec.gen[UserSessionContent]
 
-  private[services] def from(codeTokenResponse: CodeTokenResponse): Either[String, SessionCookieContent] =
-    IdToken.decode(codeTokenResponse.idToken).map { idToken =>
-      SessionCookieContent(
-        refreshToken = codeTokenResponse.refreshToken,
-        loggedUser = LoggedUser.from(idToken),
-      )
-    }
+  private[services] def from(codeTokenResponse: CodeTokenResponse): UserSessionContent =
+    UserSessionContent(
+      refreshToken = codeTokenResponse.refreshToken,
+      loggedUser = LoggedUser.from(codeTokenResponse.idToken),
+    )
 }
 
 sealed trait SessionState extends Product with Serializable {
-  def asSome[A](f: SessionCookieContent => A): Option[A] =
+  def asSome[A](f: UserSessionContent => A): Option[A] =
     this match {
       case SessionState.NoSession      => None
       case SessionState.Expired        => None
@@ -98,9 +35,9 @@ sealed trait SessionState extends Product with Serializable {
     }
 }
 object SessionState {
-  case object NoSession                                 extends SessionState
-  case object Expired                                   extends SessionState
-  final case class Valid(session: SessionCookieContent) extends SessionState
+  case object NoSession                               extends SessionState
+  case object Expired                                 extends SessionState
+  final case class Valid(session: UserSessionContent) extends SessionState
 }
 
 //noinspection NonAsciiCharacters
@@ -206,15 +143,13 @@ final class SessionManagerLive(
     def newSession(codeTokenResponse: CodeTokenResponse): Task[Cookie.Response] =
       (
         for {
-          session   <- ZIO
-                         .fromEither(SessionCookieContent.from(codeTokenResponse))
-                         .flatMapError(e => ZIO.logFatal(s"Invalid code token response: $e").as(new RuntimeException(e)))
-          sessionId <- random.nextUUID
-          expiresIn  = codeTokenResponse.expiresIn.seconds
-          _         <- sessionStorage
-                         .store(sessionId, Session.make(session.toJson, expiresIn))
-                         .retry(Schedule.fixed(100.millis) && Schedule.recurs(3).unit)
-                         .tapErrorCause(e => ZIO.logFatalCause("Failed to store the user session in the session storage", Cause.fail(e)))
+          sessionId  <- random.nextUUID
+          expiresIn   = codeTokenResponse.expiresIn.seconds
+          userSession = Session.make(UserSessionContent.from(codeTokenResponse), expiresIn)
+          _          <- sessionStorage
+                          .store(sessionId, userSession)
+                          .retry(Schedule.fixed(100.millis) && Schedule.recurs(3).unit)
+                          .tapErrorCause(e => ZIO.logFatalCause("Failed to store the user session in the session storage", Cause.fail(e)))
         } yield Cookie
           .Response(
             name = userSessionCookieName,
@@ -315,7 +250,7 @@ final class SessionManagerLive(
                   // we need to invalidate the cookie of the user
                   ZIO.succeed(SessionState.Expired)
                 case Some(session) =>
-                  session.content.fromJson[SessionCookieContent] match {
+                  session.content.fromJson[UserSessionContent] match {
                     case Left(e)            =>
                       // TODO: There's a potential issue here as we might invalidate a "sign-in" session
                       ZIO.logError(s"Error while decoding the stored session cookie: $e") *>
@@ -331,22 +266,18 @@ final class SessionManagerLive(
                                 invalidateSession(id),
                             success = response =>
                               ZIO.suspendSucceed {
-                                SessionCookieContent.from(response) match {
-                                  case Right(newSession) =>
-                                    sessionStorage
-                                      .store(id, Session.make(newSession.toJson, response.expiresIn.seconds))
-                                      .retry(Schedule.fixed(100.millis) && Schedule.recurs(3).unit)
-                                      .foldZIO(
-                                        success = _ => ZIO.succeed(SessionState.Valid(newSession)),
-                                        failure = e =>
-                                          ZIO
-                                            .logFatalCause("Failed to store the user session in the session storage", Cause.fail(e))
-                                            .as(SessionState.Expired),
-                                      )
-                                  case Left(e)           =>
-                                    ZIO.logError(s"Error while decoding the new session cookie: $e") *>
-                                      invalidateSession(id)
-                                }
+                                val newUserSessionContent = UserSessionContent.from(response)
+                                val newUserSession        = Session.make(newUserSessionContent, response.expiresIn.seconds)
+                                sessionStorage
+                                  .store(id, newUserSession)
+                                  .retry(Schedule.fixed(100.millis) && Schedule.recurs(3).unit)
+                                  .foldZIO(
+                                    success = _ => ZIO.succeed(SessionState.Valid(newUserSessionContent)),
+                                    failure = e =>
+                                      ZIO
+                                        .logFatalCause("Failed to store the user session in the session storage", Cause.fail(e))
+                                        .as(SessionState.Expired),
+                                  )
                               },
                           )
                       }

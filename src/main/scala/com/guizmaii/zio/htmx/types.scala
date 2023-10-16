@@ -2,6 +2,7 @@ package com.guizmaii.zio.htmx
 
 import zio.prelude.{AssertionError, Subtype}
 
+@SuppressWarnings(Array("scalafix:ExplicitResultTypes"))
 object types {
 
   val nonEmptyStringAssertion: String => Either[AssertionError, Unit] =

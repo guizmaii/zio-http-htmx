@@ -259,11 +259,11 @@ final class SessionManagerLive(
                       // TODO: There's a potential issue here as we might invalidate a "sign-in" session
                       ZIO.logError(s"Error while decoding the stored session cookie: $e") *>
                         invalidateSession(id)
-                    case Right(sessionData) =>
-                      if (session.notExpired(Instant.now())) ZIO.succeed(SessionState.Valid(sessionData))
+                    case Right(userSessionContent) =>
+                      if (session.notExpired(Instant.now())) ZIO.succeed(SessionState.Valid(userSessionContent))
                       else {
                         identityProvider
-                          .refreshTokens(sessionData.refreshToken)
+                          .refreshTokens(userSessionContent.refreshToken)
                           .foldZIO(
                             failure = e =>
                               ZIO.logErrorCause("Error while refreshing the tokens", Cause.fail(e)) *>

@@ -1,17 +1,17 @@
 package com.guizmaii.zio.htmx.services
 
 import com.guizmaii.zio.htmx.domain.LoggedUser
-import com.guizmaii.zio.htmx.persistence.{Session, SessionStorage}
+import com.guizmaii.zio.htmx.persistence.{Session, SessionIdEncoder, SessionStorage}
+import com.guizmaii.zio.htmx.services.SessionCookieType.{SignInSessionCookie, UserSessionCookie}
 import com.guizmaii.zio.htmx.types.CookieSignKey
 import com.guizmaii.zio.htmx.utils.ShouldNeverHappen
 import com.guizmaii.zio.htmx.{AppConfig, RuntimeEnv}
 import zio.http.*
 import zio.json.{DecoderOps, DeriveJsonCodec, JsonCodec}
 import zio.prelude.ForEachOps
-import zio.{Cause, Duration, Random, Schedule, Task, Trace, UIO, URLayer, ZEnvironment, ZIO, ZLayer, durationInt, durationLong}
+import zio.{Cause, Duration, Schedule, Task, Trace, UIO, URLayer, ZEnvironment, ZIO, ZLayer, durationInt, durationLong}
 
 import java.time.Instant
-import java.util.UUID
 import scala.annotation.nowarn
 import scala.util.control.NonFatal
 
@@ -53,6 +53,43 @@ object SessionState       {
   final case class Valid(session: UserSessionContent) extends SessionState
 }
 
+sealed trait SessionId {
+  def encode(implicit encoder: SessionIdEncoder[SessionId]): String = encoder.encode(this)
+}
+object SessionId       {
+  final case class SignInSessionId(id: String) extends SessionId
+  final case class UserSessionId(id: String)   extends SessionId
+
+  val nextSignInSessionId: UIO[SignInSessionId] = ZIO.random.flatMap(_.nextUUID).map(uuid => SignInSessionId(s"s-$uuid"))
+  val nextUserSessionId: UIO[UserSessionId]     = ZIO.random.flatMap(_.nextUUID).map(uuid => UserSessionId(s"u-$uuid"))
+
+  implicit val encoder: SessionIdEncoder[SessionId] = {
+    case SessionId.SignInSessionId(id) => id
+    case SessionId.UserSessionId(id)   => id
+  }
+}
+
+sealed trait SessionCookieType {
+  type SessionId <: com.guizmaii.zio.htmx.services.SessionId
+
+  def name: String
+  def makeSessionId(string: String): SessionId
+}
+object SessionCookieType       {
+  case object SignInSessionCookie extends SessionCookieType {
+    override type SessionId = SessionId.SignInSessionId
+
+    override def name: String                                             = "HTMX_SIGN_IN"
+    override def makeSessionId(string: String): SessionId.SignInSessionId = SessionId.SignInSessionId.apply(string)
+  }
+  case object UserSessionCookie   extends SessionCookieType {
+    override type SessionId = SessionId.UserSessionId
+
+    override def name: String                                           = "HTMX_SESSION"
+    override def makeSessionId(string: String): SessionId.UserSessionId = SessionId.UserSessionId.apply(string)
+  }
+}
+
 //noinspection NonAsciiCharacters
 trait SessionManager {
   def signInUrl(redirectTo: URL): Task[(URL, Cookie.Response)]
@@ -64,15 +101,14 @@ trait SessionManager {
 }
 
 object SessionManager {
-  def live: URLayer[RuntimeEnv & SessionStorage & IdentityProvider & AppConfig, SessionManagerLive] =
+  def live: URLayer[RuntimeEnv & SessionStorage[SessionId] & IdentityProvider & AppConfig, SessionManagerLive] =
     ZLayer.fromZIO {
       for {
         appConfig      <- ZIO.service[AppConfig]
         idp            <- ZIO.service[IdentityProvider]
-        sessionStorage <- ZIO.service[SessionStorage]
-        random         <- ZIO.random
+        sessionStorage <- ZIO.service[SessionStorage[SessionId]]
         runtimeEnv     <- ZIO.service[RuntimeEnv]
-      } yield new SessionManagerLive(appConfig.cookieSignKey, idp, sessionStorage, random, runtimeEnv)
+      } yield new SessionManagerLive(appConfig.cookieSignKey, idp, sessionStorage, runtimeEnv)
     }
 }
 
@@ -80,17 +116,13 @@ object SessionManager {
 final class SessionManagerLive(
   cookieSignKey: CookieSignKey,
   identityProvider: IdentityProvider,
-  sessionStorage: SessionStorage,
-  random: Random,
+  sessionStorage: SessionStorage[SessionId],
   runtimeEnv: RuntimeEnv,
 ) extends SessionManager {
-  private val signInCookieName: "HTMX_SIGN_IN"      = "HTMX_SIGN_IN"
-  private val userSessionCookieName: "HTMX_SESSION" = "HTMX_SESSION"
-
   private val signInSessionInvalidationCookie: Cookie.Response =
     Cookie
       .Response(
-        name = signInCookieName,
+        name = SignInSessionCookie.name,
         content = "",
         maxAge = Some(Duration.Zero), // expires the session cookie
         isSecure = runtimeEnv.isProdLike,
@@ -103,7 +135,7 @@ final class SessionManagerLive(
   private val userSessionInvalidationCookie: Cookie.Response =
     Cookie
       .Response(
-        name = userSessionCookieName,
+        name = UserSessionCookie.name,
         content = "",
         maxAge = Some(Duration.Zero), // expires the session cookie
         isSecure = runtimeEnv.isProdLike,
@@ -131,7 +163,7 @@ final class SessionManagerLive(
     def signInState(request: Request): UIO[Option[SignInSessionContent]] =
       ZIO
         .suspendSucceed {
-          sessionId(request, signInCookieName) match {
+          sessionId(request, SignInSessionCookie) match {
             case None     => ZIO.none
             case Some(id) =>
               sessionStorage
@@ -160,7 +192,7 @@ final class SessionManagerLive(
     def newSession(codeTokenResponse: CodeTokenResponse): Task[Cookie.Response] =
       (
         for {
-          sessionId  <- random.nextUUID
+          sessionId  <- SessionId.nextUserSessionId
           expiresIn   = codeTokenResponse.expiresIn.seconds
           userSession = Session.make(UserSessionContent.from(codeTokenResponse), expiresIn)
           _          <- sessionStorage
@@ -169,8 +201,8 @@ final class SessionManagerLive(
                           .tapErrorCause(e => ZIO.logFatalCause("Failed to store the user session in the session storage", Cause.fail(e)))
         } yield Cookie
           .Response(
-            name = userSessionCookieName,
-            content = sessionId.toString,
+            name = UserSessionCookie.name,
+            content = sessionId.encode,
             maxAge = Some(expiresIn),
             isSecure = runtimeEnv.isProdLike,
             isHttpOnly = true,
@@ -245,7 +277,7 @@ final class SessionManagerLive(
     }
 
   private def userSessionState(request: Request): UIO[SessionState] = {
-    def invalidateSession(id: UUID): UIO[SessionState.Expired.type] =
+    def invalidateSession(id: SessionId): UIO[SessionState.Expired.type] =
       sessionStorage
         .invalidate(id)
         .retry(Schedule.fixed(100.millis) && Schedule.recurs(3).unit)
@@ -258,7 +290,7 @@ final class SessionManagerLive(
         )
 
     ZIO.suspendSucceed {
-      sessionId(request, userSessionCookieName) match {
+      sessionId(request, UserSessionCookie) match {
         case None     => ZIO.succeed(SessionState.NoSession)
         case Some(id) =>
           sessionStorage
@@ -277,7 +309,6 @@ final class SessionManagerLive(
                 case Some(session) =>
                   session.content.fromJson[UserSessionContent] match {
                     case Left(e)                   =>
-                      // TODO: There's a potential issue here as we might invalidate a "sign-in" session
                       ZIO.logError(s"Error while decoding the stored session cookie: $e") *>
                         invalidateSession(id)
                     case Right(userSessionContent) =>
@@ -316,7 +347,7 @@ final class SessionManagerLive(
   private def newSignInSession(state: String, redirectTo: URL): Task[Cookie.Response] =
     (
       for {
-        sessionId    <- random.nextUUID
+        sessionId    <- SessionId.nextSignInSessionId
         expiresIn     = 1.hour
         signInSession = Session.make(SignInSessionContent(state = state, redirectTo = redirectTo), expiresIn)
         _            <- sessionStorage
@@ -325,8 +356,8 @@ final class SessionManagerLive(
                           .tapErrorCause(e => ZIO.logFatalCause("Failed to store the sign-in session in the session storage", Cause.fail(e)))
       } yield Cookie
         .Response(
-          name = signInCookieName,
-          content = sessionId.toString,
+          name = SignInSessionCookie.name,
+          content = sessionId.encode,
           maxAge = Some(expiresIn), // This cookie is valid only 1h
           isSecure = runtimeEnv.isProdLike,
           isHttpOnly = true,
@@ -341,15 +372,15 @@ final class SessionManagerLive(
    * That's not so important if the invalidation fails as the sign-in session only last 1 hours and as we'll remove the cookie containing the ID.
    */
   private def invalidateSignInSession(request: Request): UIO[Cookie.Response] =
-    invalidateSession(request, signInCookieName).as(signInSessionInvalidationCookie)
+    invalidateSession(request, SignInSessionCookie).as(signInSessionInvalidationCookie)
 
   /**
    * That's not so important if the invalidation fails as we'll remove the cookie containing the ID.
    */
   private def invalidateUserSession(request: Request): UIO[Cookie.Response] =
-    invalidateSession(request, userSessionCookieName).as(userSessionInvalidationCookie)
+    invalidateSession(request, UserSessionCookie).as(userSessionInvalidationCookie)
 
-  private def invalidateSession(request: Request, cookieName: String): UIO[Unit] =
+  private def invalidateSession(request: Request, cookieName: SessionCookieType): UIO[Unit] =
     ZIO.suspendSucceed {
       sessionId(request, cookieName) match {
         case None            => ZIO.unit
@@ -362,15 +393,15 @@ final class SessionManagerLive(
       }
     }
 
-  private def sessionId(request: Request, cookieName: String): Option[UUID] =
+  private def sessionId(request: Request, sessionCookieType: SessionCookieType): Option[sessionCookieType.SessionId] =
     request
       .header(Header.Cookie)
-      .flatMap(_.value.find(_.name == cookieName))
+      .flatMap(_.value.find(_.name == sessionCookieType.name))
       .flatMap(_.unSign(cookieSignKey))
       .flatMap { cookie =>
         if (cookie.content.isBlank) None
         else
-          try Some(UUID.fromString(cookie.content))
+          try Some(sessionCookieType.makeSessionId(cookie.content))
           catch {
             case NonFatal(_) => None
           }

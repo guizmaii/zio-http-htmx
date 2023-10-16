@@ -1,7 +1,7 @@
 package com.guizmaii.zio.htmx
 
 import com.guizmaii.zio.htmx.persistence.SessionStorage
-import com.guizmaii.zio.htmx.services.{IdentityProvider, KindeConfig, SessionManager, UsersService}
+import com.guizmaii.zio.htmx.services.*
 import zio.*
 import zio.http.*
 import zio.http.HttpAppMiddleware.*
@@ -84,7 +84,7 @@ object Main extends ZIOAppDefault {
       IdentityProvider.kinde,
       Client.default,
       SessionManager.live,
-      SessionStorage.inMemory,
+      SessionStorage.inMemory[SessionId],
       ZLayer.succeed(RuntimeEnv.Dev), // TODO: Not prod ready. Should be loaded from the env for example.
     )
 }

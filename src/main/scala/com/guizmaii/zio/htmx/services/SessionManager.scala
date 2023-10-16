@@ -193,7 +193,7 @@ final class SessionManagerLive(
                                   signInSessionInvalidationCookie <- invalidateSignInSession(request)
                                 } yield (redirectTo, newSessionCookie, signInSessionInvalidationCookie)
                               case _                                                                                                    =>
-                                ZIO.fail(new RuntimeException("Invalid state")) // TODO Jules: can we do better?
+                                ZIO.fail(new RuntimeException("Invalid state"))
                             }
     } yield cookies
   }

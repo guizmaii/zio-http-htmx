@@ -4,8 +4,9 @@ import com.guizmaii.zio.htmx.AppConfig
 import com.guizmaii.zio.htmx.domain.LoggedUser
 import com.guizmaii.zio.htmx.persistence.{Session, SessionStorage}
 import com.guizmaii.zio.htmx.types.CookieSignKey
+import com.guizmaii.zio.htmx.utils.ShouldNeverHappen
 import zio.http.*
-import zio.json.{DecoderOps, DeriveJsonCodec, EncoderOps, JsonCodec}
+import zio.json.{DecoderOps, DeriveJsonCodec, JsonCodec}
 import zio.prelude.ForEachOps
 import zio.{Cause, Duration, Random, Schedule, Task, Trace, UIO, URLayer, ZEnvironment, ZIO, ZLayer, durationInt, durationLong}
 
@@ -13,6 +14,18 @@ import java.time.Instant
 import java.util.UUID
 import scala.annotation.nowarn
 import scala.util.control.NonFatal
+
+final case class SignInSessionContent(state: String, redirectTo: URL)
+object SignInSessionContent {
+  implicit private[SignInSessionContent] val urlCodec: JsonCodec[URL] =
+    JsonCodec.string
+      .transform[URL](
+        s => URL.decode(s).fold(e => throw ShouldNeverHappen("Failed to decode URL", e), identity),
+        _.encode,
+      )
+
+  implicit val codec: JsonCodec[SignInSessionContent] = DeriveJsonCodec.gen[SignInSessionContent]
+}
 
 @nowarn("cat=scala3-migration")
 final case class UserSessionContent private (refreshToken: String, loggedUser: LoggedUser)
@@ -26,7 +39,7 @@ object UserSessionContent {
     )
 }
 
-sealed trait SessionState extends Product with Serializable {
+sealed trait SessionState {
   def asSome[A](f: UserSessionContent => A): Option[A] =
     this match {
       case SessionState.NoSession      => None
@@ -34,7 +47,7 @@ sealed trait SessionState extends Product with Serializable {
       case SessionState.Valid(session) => Some(f(session))
     }
 }
-object SessionState {
+object SessionState       {
   case object NoSession                               extends SessionState
   case object Expired                                 extends SessionState
   final case class Valid(session: UserSessionContent) extends SessionState
@@ -42,9 +55,9 @@ object SessionState {
 
 //noinspection NonAsciiCharacters
 trait SessionManager {
-  def signInUrl: Task[(URL, Cookie.Response)]
+  def signInUrl(redirectTo: URL): Task[(URL, Cookie.Response)]
   def logoutUrl(request: Request): UIO[(URL, Cookie.Response, Cookie.Response)]
-  def newUserSession(request: Request): Task[(Cookie.Response, Cookie.Response)]
+  def newUserSession(request: Request): Task[(URL, Cookie.Response, Cookie.Response)]
   def loggedUser(request: Request): UIO[Option[LoggedUser]]
 
   def authMiddleware[R]: HttpAppMiddleware.WithOut[R & LoggedUser, R, Nothing, Any, λ[Env => R], λ[Err => Err]]
@@ -98,11 +111,11 @@ final class SessionManagerLive(
       )
       .sign(cookieSignKey)
 
-  override def signInUrl: Task[(URL, Cookie.Response)] =
+  override def signInUrl(redirectTo: URL): Task[(URL, Cookie.Response)] =
     (
       for {
         (signInUrl, state)  <- ZIO.succeed(identityProvider.getSignInUrl)
-        signInSessionCookie <- newSignInSession(state)
+        signInSessionCookie <- newSignInSession(state, redirectTo = redirectTo)
       } yield (signInUrl, signInSessionCookie)
     ).logError("Error while creating the sign-in session")
 
@@ -112,8 +125,8 @@ final class SessionManagerLive(
       userSessionInvalidationCookie   <- invalidateUserSession(request)
     } yield (identityProvider.logoutUrl, signInSessionInvalidationCookie, userSessionInvalidationCookie)
 
-  override def newUserSession(request: Request): Task[(Cookie.Response, Cookie.Response)] = {
-    def signInState(request: Request): UIO[Option[String]] =
+  override def newUserSession(request: Request): Task[(URL, Cookie.Response, Cookie.Response)] = {
+    def signInState(request: Request): UIO[Option[SignInSessionContent]] =
       ZIO
         .suspendSucceed {
           sessionId(request, signInCookieName) match {
@@ -127,18 +140,16 @@ final class SessionManagerLive(
                     ZIO
                       .logFatalCause("Failed to get the sign-in session from the storage", Cause.fail(e))
                       .as(None),
-                  success = {
-                    case None          => ZIO.none
-                    case Some(session) =>
-                      if (session.notExpired(Instant.now())) ZIO.some(session.content)
-                      else {
-                        // We can ignore here as the session cookie will be wiped out anyway
-                        sessionStorage
-                          .invalidate(id)
-                          .retry(Schedule.fixed(100.millis) && Schedule.recurs(3).unit)
-                          .ignore
-                          .as(None)
-                      }
+                  success = _.map(s => s.decode[SignInSessionContent] -> s) match {
+                    case None                                                                              => ZIO.none
+                    case Some((Right(signInSessionContent), session)) if session.notExpired(Instant.now()) => ZIO.some(signInSessionContent)
+                    case _                                                                                 =>
+                      // We can ignore here as the session cookie will be wiped out anyway
+                      sessionStorage
+                        .invalidate(id)
+                        .retry(Schedule.fixed(100.millis) && Schedule.recurs(3).unit)
+                        .ignore
+                        .as(None)
                   },
                 )
           }
@@ -149,7 +160,7 @@ final class SessionManagerLive(
         for {
           sessionId  <- random.nextUUID
           expiresIn   = codeTokenResponse.expiresIn.seconds
-          userSession = Session.make(UserSessionContent.from(codeTokenResponse).toJson, expiresIn)
+          userSession = Session.make(UserSessionContent.from(codeTokenResponse), expiresIn)
           _          <- sessionStorage
                           .store(sessionId, userSession)
                           .retry(Schedule.fixed(100.millis) && Schedule.recurs(3).unit)
@@ -169,19 +180,19 @@ final class SessionManagerLive(
       ).logError("Error while creating the session")
 
     for {
-      maybeSavedState <- signInState(request)
-      maybeState       = request.url.queryParams.get("state").flatMap(_.headOption.filter(_.nonEmpty))
-      maybeCode        = request.url.queryParams.get("code").flatMap(_.headOption.filter(_.nonEmpty))
-      cookies         <- (maybeCode, maybeSavedState, maybeState) match {
-                           case (Some(code), Some(savedState), Some(state)) if savedState == state =>
-                             for {
-                               tokens                          <- identityProvider.handleSignIn(code)
-                               newSessionCookie                <- newSession(tokens)
-                               signInSessionInvalidationCookie <- invalidateSignInSession(request)
-                             } yield (newSessionCookie, signInSessionInvalidationCookie)
-                           case _                                                                  =>
-                             ZIO.fail(new RuntimeException("Invalid state")) // TODO Jules: can we do better?
-                         }
+      maybeSignInSession <- signInState(request)
+      maybeState          = request.url.queryParams.get("state").flatMap(_.headOption.filter(_.nonEmpty))
+      maybeCode           = request.url.queryParams.get("code").flatMap(_.headOption.filter(_.nonEmpty))
+      cookies            <- (maybeCode, maybeSignInSession, maybeState) match {
+                              case (Some(code), Some(SignInSessionContent(savedState, redirectTo)), Some(state)) if savedState == state =>
+                                for {
+                                  tokens                          <- identityProvider.handleSignIn(code)
+                                  newSessionCookie                <- newSession(tokens)
+                                  signInSessionInvalidationCookie <- invalidateSignInSession(request)
+                                } yield (redirectTo, newSessionCookie, signInSessionInvalidationCookie)
+                              case _                                                                                                    =>
+                                ZIO.fail(new RuntimeException("Invalid state")) // TODO Jules: can we do better?
+                            }
     } yield cookies
   }
 
@@ -205,11 +216,11 @@ final class SessionManagerLive(
             case SessionState.Valid(session)                   => providedHttp(session.loggedUser)
             case SessionState.NoSession | SessionState.Expired =>
               Http.fromHandler {
-                Handler.responseZIO {
+                Handler.fromFunctionZIO { request =>
                   ZIO.suspendSucceed {
                     val (signInUri, state) = identityProvider.getSignInUrl
 
-                    newSignInSession(state)
+                    newSignInSession(state, redirectTo = request.url)
                       .foldZIO(
                         failure = e =>
                           ZIO
@@ -279,7 +290,7 @@ final class SessionManagerLive(
                             success = tokens =>
                               ZIO.suspendSucceed {
                                 val newUserSessionContent = UserSessionContent.from(tokens)
-                                val newUserSession        = Session.make(newUserSessionContent.toJson, tokens.expiresIn.seconds)
+                                val newUserSession        = Session.make(newUserSessionContent, tokens.expiresIn.seconds)
                                 sessionStorage
                                   .store(id, newUserSession)
                                   .retry(Schedule.fixed(100.millis) && Schedule.recurs(3).unit)
@@ -300,15 +311,16 @@ final class SessionManagerLive(
     }
   }
 
-  private def newSignInSession(state: String): Task[Cookie.Response] =
+  private def newSignInSession(state: String, redirectTo: URL): Task[Cookie.Response] =
     (
       for {
-        sessionId <- random.nextUUID
-        expiresIn  = 1.hour
-        _         <- sessionStorage
-                       .store(sessionId, Session.make(state, expiresIn))
-                       .retry(Schedule.fixed(100.millis) && Schedule.recurs(3).unit)
-                       .tapErrorCause(e => ZIO.logFatalCause("Failed to store the sign-in session in the session storage", Cause.fail(e)))
+        sessionId    <- random.nextUUID
+        expiresIn     = 1.hour
+        signInSession = Session.make(SignInSessionContent(state = state, redirectTo = redirectTo), expiresIn)
+        _            <- sessionStorage
+                          .store(sessionId, signInSession)
+                          .retry(Schedule.fixed(100.millis) && Schedule.recurs(3).unit)
+                          .tapErrorCause(e => ZIO.logFatalCause("Failed to store the sign-in session in the session storage", Cause.fail(e)))
       } yield Cookie
         .Response(
           name = signInCookieName,

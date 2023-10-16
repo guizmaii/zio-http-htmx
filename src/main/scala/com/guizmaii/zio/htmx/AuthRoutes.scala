@@ -13,22 +13,31 @@ object AuthRoutes {
     Http.collectZIO[Request] {
 
       case req @ Method.GET -> Root / "auth" / "sign-in" =>
-        ZIO.serviceWithZIO[SessionManager] { sessionManager =>
-          sessionManager.loggedUser(req).flatMap {
-            case Some(_) => ZIO.succeed(Response.ok) // TODO Jules: Probably not the correct thing to answer with htmx
-            case None    =>
-              sessionManager.signInUrl
-                .foldZIO(
-                  failure = e =>
-                    ZIO
-                      .logErrorCause("Error while handling the sign-in request", Cause.fail(e))
-                      .as(Response.status(Status.InternalServerError)), // TODO Jules: Maybe not the thing to answer with htmx
-                  success = { case (signInUrl, signInSession) =>
-                    ZIO.succeed(Response.redirect(signInUrl).addCookie(signInSession))
-                  },
-                )
-          }
-        }
+        for {
+          sessionManager  <- ZIO.service[SessionManager]
+          redirectTo       = req.url.queryParams
+                               .get("redirectTo")
+                               .flatMap(_.headOption)
+                               .filter(_.nonEmpty)
+                               .flatMap(URL.decode(_).toOption)
+                               .getOrElse(URL.root)
+          maybeLoggedUser <- sessionManager.loggedUser(req)
+          response        <- maybeLoggedUser match {
+                               case Some(_) => ZIO.succeed(Response.redirect(redirectTo))
+                               case None    =>
+                                 sessionManager
+                                   .signInUrl(redirectTo)
+                                   .foldZIO(
+                                     failure = e =>
+                                       ZIO
+                                         .logErrorCause("Error while handling the sign-in request", Cause.fail(e))
+                                         .as(Response.status(Status.InternalServerError)), // TODO Jules: Maybe not the thing to answer with htmx
+                                     success = { case (signInUrl, signInSession) =>
+                                       ZIO.succeed(Response.redirect(signInUrl).addCookie(signInSession))
+                                     },
+                                   )
+                             }
+        } yield response
 
       case req @ Method.GET -> Root / "auth" / "callback" =>
         ZIO
@@ -38,11 +47,10 @@ object AuthRoutes {
               ZIO
                 .logErrorCause("Error while handling the sign-in callback", Cause.fail(e))
                 .as(Response.status(Status.Unauthorized)), // TODO Jules: Can we do better?
-            success = { case (newUserSession, signInSessionInvalidation) =>
+            success = { case (redirectTo, newUserSession, signInSessionInvalidation) =>
               ZIO.succeed {
-                // TODO Jules: For now, we always redirect to `/`, do we want/need to redirect somewhere else?
                 Response
-                  .redirect(URL.root)
+                  .redirect(redirectTo)
                   .addCookie(newUserSession)
                   .addCookie(signInSessionInvalidation)
               }

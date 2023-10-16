@@ -133,7 +133,11 @@ final class SessionManagerLive(
                       if (session.notExpired(Instant.now())) ZIO.some(session.content)
                       else {
                         // We can ignore here as the session cookie will be wiped out anyway
-                        sessionStorage.invalidate(id).ignore.as(None)
+                        sessionStorage
+                          .invalidate(id)
+                          .retry(Schedule.fixed(100.millis) && Schedule.recurs(3).unit)
+                          .ignore
+                          .as(None)
                       }
                   },
                 )
@@ -223,6 +227,7 @@ final class SessionManagerLive(
     def invalidateSession(id: UUID): UIO[SessionState.Expired.type] =
       sessionStorage
         .invalidate(id)
+        .retry(Schedule.fixed(100.millis) && Schedule.recurs(3).unit)
         .foldZIO(
           success = _ => ZIO.succeed(SessionState.Expired),
           failure = e =>
@@ -237,6 +242,7 @@ final class SessionManagerLive(
         case Some(id) =>
           sessionStorage
             .get(id)
+            .retry(Schedule.fixed(100.millis) && Schedule.recurs(3).unit)
             .foldZIO(
               failure = e =>
                 ZIO
@@ -328,6 +334,7 @@ final class SessionManagerLive(
         case Some(sessionId) =>
           sessionStorage
             .invalidate(sessionId)
+            .retry(Schedule.fixed(100.millis) && Schedule.recurs(3).unit)
             .logError("Error while invalidating the session")
             .ignore
       }

@@ -23,7 +23,7 @@ object Main extends ZIOAppDefault {
     (zio.Runtime.removeDefaultLoggers >>> SLF4J.slf4j) ++
       Runtime.setExecutor(Executor.makeDefault(autoBlocking = false))
 
-  // TODO Jules: Not prod ready. WARN: It's currectly also used for the webhooks API.
+  // TODO Jules: Not prod ready
   private val corsConfig: CorsConfig = CorsConfig(allowedOrigin = _ => Some(Header.AccessControlAllowOrigin.All))
 
   private val bootSequence: ZIO[Any, Throwable, Unit] =

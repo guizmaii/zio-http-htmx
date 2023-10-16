@@ -7,6 +7,7 @@ final case class LoggedUser(
   identityProviderId: String,
   firstName: String,
   lastName: String,
+  name: String,
   email: String,
   picture: Option[String],
 )
@@ -19,6 +20,7 @@ object LoggedUser {
       identityProviderId = idToken.sub,
       firstName = idToken.given_name,
       lastName = idToken.family_name,
+      name = idToken.name,
       email = idToken.email,
       picture = idToken.picture,
     )

@@ -1,6 +1,6 @@
 package com.guizmaii.zio.htmx.persistence
 
-import zio.json.{EncoderOps, JsonEncoder}
+import zio.json.{DecoderOps, EncoderOps, JsonDecoder, JsonEncoder}
 import zio.{Duration, Ref, Task, ZLayer}
 
 import java.time.Instant
@@ -8,6 +8,8 @@ import java.util.UUID
 
 final case class Session(content: String, expiresAt: Instant) {
   def notExpired(now: Instant): Boolean = now.isBefore(expiresAt)
+
+  def decode[A](implicit decoder: JsonDecoder[A]): Either[String, A] = content.fromJson[A]
 }
 object Session                                                {
   def make[A: JsonEncoder](content: A, expiresIn: Duration): Session =

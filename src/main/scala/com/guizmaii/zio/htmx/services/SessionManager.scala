@@ -1,10 +1,10 @@
 package com.guizmaii.zio.htmx.services
 
-import com.guizmaii.zio.htmx.AppConfig
 import com.guizmaii.zio.htmx.domain.LoggedUser
 import com.guizmaii.zio.htmx.persistence.{Session, SessionStorage}
 import com.guizmaii.zio.htmx.types.CookieSignKey
 import com.guizmaii.zio.htmx.utils.ShouldNeverHappen
+import com.guizmaii.zio.htmx.{AppConfig, RuntimeEnv}
 import zio.http.*
 import zio.json.{DecoderOps, DeriveJsonCodec, JsonCodec}
 import zio.prelude.ForEachOps
@@ -64,14 +64,15 @@ trait SessionManager {
 }
 
 object SessionManager {
-  def live: URLayer[SessionStorage & IdentityProvider & AppConfig, SessionManagerLive] =
+  def live: URLayer[RuntimeEnv & SessionStorage & IdentityProvider & AppConfig, SessionManagerLive] =
     ZLayer.fromZIO {
       for {
         appConfig      <- ZIO.service[AppConfig]
         idp            <- ZIO.service[IdentityProvider]
         sessionStorage <- ZIO.service[SessionStorage]
         random         <- ZIO.random
-      } yield new SessionManagerLive(appConfig.cookieSignKey, idp, sessionStorage, random)
+        runtimeEnv     <- ZIO.service[RuntimeEnv]
+      } yield new SessionManagerLive(appConfig.cookieSignKey, idp, sessionStorage, random, runtimeEnv)
     }
 }
 
@@ -81,6 +82,7 @@ final class SessionManagerLive(
   identityProvider: IdentityProvider,
   sessionStorage: SessionStorage,
   random: Random,
+  runtimeEnv: RuntimeEnv,
 ) extends SessionManager {
   private val signInCookieName: "HTMX_SIGN_IN"      = "HTMX_SIGN_IN"
   private val userSessionCookieName: "HTMX_SESSION" = "HTMX_SESSION"
@@ -91,7 +93,7 @@ final class SessionManagerLive(
         name = signInCookieName,
         content = "",
         maxAge = Some(Duration.Zero), // expires the session cookie
-        isSecure = false,             // TODO: should be `true` in Staging and Prod
+        isSecure = runtimeEnv.isProdLike,
         isHttpOnly = true,
         sameSite = Some(Cookie.SameSite.Lax),
         path = Some(Path.root / "auth"),
@@ -104,7 +106,7 @@ final class SessionManagerLive(
         name = userSessionCookieName,
         content = "",
         maxAge = Some(Duration.Zero), // expires the session cookie
-        isSecure = false,             // TODO: should be `true` in Staging and Prod
+        isSecure = runtimeEnv.isProdLike,
         isHttpOnly = true,
         sameSite = Some(Cookie.SameSite.Lax),
         path = Some(Path.root),
@@ -170,7 +172,7 @@ final class SessionManagerLive(
             name = userSessionCookieName,
             content = sessionId.toString,
             maxAge = Some(expiresIn),
-            isSecure = false, // TODO: should be `true` in Staging and Prod
+            isSecure = runtimeEnv.isProdLike,
             isHttpOnly = true,
             // Needs to be Lax otherwise the cookie isn't included in `/` request coming from Kinde after login
             sameSite = Some(Cookie.SameSite.Lax),
@@ -326,7 +328,7 @@ final class SessionManagerLive(
           name = signInCookieName,
           content = sessionId.toString,
           maxAge = Some(expiresIn), // This cookie is valid only 1h
-          isSecure = false,         // TODO: should be `true` in Staging and Prod
+          isSecure = runtimeEnv.isProdLike,
           isHttpOnly = true,
           // Needs to be Lax otherwise the cookie isn't included in the `/auth/callback` request coming from Kinde
           sameSite = Some(Cookie.SameSite.Lax),

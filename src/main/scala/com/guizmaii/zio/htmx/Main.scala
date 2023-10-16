@@ -85,5 +85,6 @@ object Main extends ZIOAppDefault {
       Client.default,
       SessionManager.live,
       SessionStorage.inMemory,
+      ZLayer.succeed(RuntimeEnv.Dev), // TODO: Not prod ready. Should be loaded from the env for example.
     )
 }

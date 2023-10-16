@@ -2,6 +2,7 @@ package com.guizmaii.zio.htmx.services
 
 import com.guizmaii.zio.htmx.types.NonEmptyString
 import com.guizmaii.zio.htmx.utils.Config.*
+import com.guizmaii.zio.htmx.utils.ShouldNeverHappen
 import zio.Config.Secret
 import zio.config.{ConfigDescriptor, ReadError, ZConfig}
 import zio.http.*
@@ -13,17 +14,88 @@ import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.security.SecureRandom
 import java.util.Base64
+import java.util.regex.Pattern
+import scala.util.control.NonFatal
+
+/**
+ * Raw id_token from Kinde contains:
+ * {{{
+ *  {
+ *    "at_hash": "sWoDGICu3YcYX9_tC0QIdE",
+ *    "aud": [
+ *      "https://<my-app>.kinde.com",
+ *      "844e057836fd4e1fbb2c92507c58add2"
+ *    ],
+ *    "auth_time": 1697184156,
+ *    "azp": "844e057836fd4e1fbb2c92507c58add2",
+ *    "email": "jules.ivanic@gmail.com",
+ *    "exp": 1697187756,
+ *    "family_name": "Ivanic",
+ *    "given_name": "Jules",
+ *    "iat": 1697185641,
+ *    "iss": "https://<my-app>.kinde.com",
+ *    "jti": "e341aa0d-407a-4689-980a-039d14d0b3fb",
+ *    "name": "Jules Ivanic",
+ *    "org_codes": [
+ *      "org_576a383bb64"
+ *    ],
+ *    "picture": "https://avatars.githubusercontent.com/u/1193670?v=4",
+ *    "sub": "kp_0c6149688c8ded448a8dbe0aed4c6bac",
+ *    "updated_at": 1697125145
+ * }
+ * }}}
+ *
+ * See also: https://kinde.com/docs/build/about-id-tokens/
+ *
+ * Additional info:
+ *  - `picture` can be `null` according to the TS SDK
+ *  - `sub` is the user ID
+ */
+final case class IdToken(
+  sub: String,
+  given_name: String,
+  family_name: String,
+  name: String,
+  email: String,
+  picture: Option[String],
+) {
+  @inline def userId: String    = sub
+  @inline def firstName: String = given_name
+  @inline def lastName: String  = family_name
+  @inline def fullName: String  = name
+}
+object IdToken {
+
+  /**
+   * Split a string on the `.` character
+   */
+  private val headerRegex: Pattern                       = Pattern.compile("\\.")
+  private val dataStructureDecoder: JsonDecoder[IdToken] = DeriveJsonDecoder.gen[IdToken]
+
+  implicit val decoder: JsonDecoder[IdToken] = JsonDecoder.string.mapOrFail { raw =>
+    headerRegex.split(raw, 3) match {
+      case Array(_, claims, _) =>
+        try {
+          val decoded = Base64.getUrlDecoder.decode(claims.getBytes(StandardCharsets.UTF_8))
+          dataStructureDecoder.decodeJson(new String(decoded, StandardCharsets.UTF_8))
+        } catch {
+          case NonFatal(_) => Left("Invalid id_token: Unable to decode claims")
+        }
+      case _                   => Left("Invalid id_token: Token does not match the correct pattern")
+    }
+  }
+}
 
 final case class CodeTokenResponse(
   access_token: String,
   refresh_token: String,
-  id_token: String,
+  id_token: IdToken,
   scope: String,
   expires_in: Long,
 ) {
   @inline def accessToken: String  = access_token
   @inline def refreshToken: String = refresh_token
-  @inline def idToken: String      = id_token
+  @inline def idToken: IdToken     = id_token
   @inline def expiresIn: Long      = expires_in
 }
 object CodeTokenResponse {
@@ -84,7 +156,10 @@ final class Kinde(config: KindeConfig, client: ZEnvironment[Client], secureRando
    */
   private val scopes: String     = "openid%20offline%20profile%20email"
   private val authUrl: String    = s"${config.domain}/oauth2/auth"
-  private val tokenUrl: URL      = URL.decode(s"${config.domain}/oauth2/token").fold(throw _, identity) // throw side should never happen
+  private val tokenUrl: URL      =
+    URL
+      .decode(s"${config.domain}/oauth2/token")
+      .fold(e => throw ShouldNeverHappen("Failed to make the Token URL", e), identity)
   private val clientSecret       = config.clientSecret.value.toArray.mkString
   private val encodedRedirectUri = URLEncoder.encode(config.callbackUrl, StandardCharsets.UTF_8)
 
@@ -111,7 +186,7 @@ final class Kinde(config: KindeConfig, client: ZEnvironment[Client], secureRando
       .decode(
         s"$authUrl?response_type=code&client_id=${config.clientId}&redirect_uri=$encodedRedirectUri&scope=$scopes&state=$state"
       )
-      .fold(throw _, _ -> state) // The throw part should never happen
+      .fold(e => throw ShouldNeverHappen("Failed to make sign-in URL", e), _ -> state)
   }
 
   /**
@@ -202,5 +277,7 @@ final class Kinde(config: KindeConfig, client: ZEnvironment[Client], secureRando
       .provideEnvironment(client)
 
   override val logoutUrl: URL =
-    URL.decode(s"${config.domain}/logout?redirect=${config.logoutRedirectUrl}").fold(throw _, identity) // throw side should never happen
+    URL
+      .decode(s"${config.domain}/logout?redirect=${config.logoutRedirectUrl}")
+      .fold(e => throw ShouldNeverHappen("Failed to make the logout URL", e), identity)
 }

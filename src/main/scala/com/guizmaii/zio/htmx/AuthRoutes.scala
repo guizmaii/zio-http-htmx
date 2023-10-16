@@ -1,55 +1,58 @@
 package com.guizmaii.zio.htmx
 
-import com.guizmaii.zio.htmx.services.{IdentityProvider, SessionCookieContent, SessionManager}
+import com.guizmaii.zio.htmx.services.SessionManager
 import zio.http.*
-import zio.{ZIO, durationLong}
+import zio.{Cause, ZIO}
 
 object AuthRoutes {
 
   /**
    * Based on https://docs.logto.io/docs/recipes/integrate-logto/traditional/
    */
-  val routes: App[IdentityProvider & SessionManager] =
+  val routes: App[SessionManager] =
     Http.collectZIO[Request] {
 
       case Method.GET -> Root / "auth" / "sign-in" =>
-        for {
-          sessionManager     <- ZIO.service[SessionManager]
-          (signInUri, state) <- ZIO.serviceWith[IdentityProvider](_.getSignInUrl)
-        } yield Response.redirect(signInUri).addCookie(sessionManager.signInCookie(state))
+        ZIO
+          .serviceWithZIO[SessionManager](_.signInUrl)
+          .foldZIO(
+            failure = e =>
+              ZIO
+                .logErrorCause("Error while handling the sign-in request", Cause.fail(e))
+                .as(Response.status(Status.InternalServerError)), // TODO Jules: Maybe not the thing to answer with htmx
+            success = { case (signInUrl, signInSession) =>
+              ZIO.succeed(Response.redirect(signInUrl).addCookie(signInSession))
+            },
+          )
 
       case req @ Method.GET -> Root / "auth" / "callback" =>
-        for {
-          sessionManager <- ZIO.service[SessionManager]
-          maybeSavedState = sessionManager.getSignInState(req)
-          maybeState      = req.url.queryParams.get("state").flatMap(_.headOption.filter(_.nonEmpty))
-          maybeCode       = req.url.queryParams.get("code").flatMap(_.headOption.filter(_.nonEmpty))
-          response       <- (maybeCode, maybeSavedState, maybeState) match {
-                              case (Some(code), Some(savedState), Some(state)) if savedState == state =>
-                                (
-                                  for {
-                                    response   <- ZIO.serviceWithZIO[IdentityProvider](_.handleSignIn(code))
-                                    newSession <- ZIO.fromEither(SessionCookieContent.from(response))
-                                  } yield
-                                  // TODO Jules: For now, we always redirect to `/`, do we want/need to redirect somewhere else?
-                                  Response
-                                    .redirect(URL.root)
-                                    .addCookie(sessionManager.newSessionCookie(newSession, response.expiresIn.seconds))
-                                    .addCookie(sessionManager.signInInvalidationCookie)
-                                )
-                                  .logError("Error while handling the sign-in callback")
-                                  .orElseFail(Response.status(Status.InternalServerError)) // TODO Jules: Maybe not the thing to answer with htmx
+        ZIO
+          .serviceWithZIO[SessionManager](_.newUserSession(req))
+          .foldZIO(
+            failure = e =>
+              ZIO
+                .logErrorCause("Error while handling the sign-in callback", Cause.fail(e))
+                .as(Response.status(Status.Unauthorized)), // TODO Jules: Can we do better?
+            success = { case (newUserSession, signInSessionInvalidation) =>
+              ZIO.succeed {
+                // TODO Jules: For now, we always redirect to `/`, do we want/need to redirect somewhere else?
+                Response
+                  .redirect(URL.root)
+                  .addCookie(newUserSession)
+                  .addCookie(signInSessionInvalidation)
+              }
+            },
+          )
 
-                              case _ =>
-                                ZIO.succeed(Response.status(Status.BadRequest))
-                            }
-        } yield response
-
-      case Method.GET -> Root / "auth" / "sign-out" =>
-        for {
-          sessionManager <- ZIO.service[SessionManager]
-          idp            <- ZIO.service[IdentityProvider]
-        } yield Response.redirect(idp.logoutUrl).addCookie(sessionManager.sessionInvalidationCookie)
+      case req @ Method.GET -> Root / "auth" / "sign-out" =>
+        ZIO
+          .serviceWithZIO[SessionManager](_.logoutUrl(req))
+          .map { case (url, userSessionInvalidation, signInSessionInvalidation) =>
+            Response
+              .redirect(url)
+              .addCookie(userSessionInvalidation)
+              .addCookie(signInSessionInvalidation) // We also invalidate the "sign-in" cookie, just in case.
+          }
     }
 
 }

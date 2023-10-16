@@ -1,0 +1,11 @@
+@import com.guizmaii.zio.htmx.domain.LoggedUser
+
+@(loggedUser: LoggedUser)
+
+@main {
+    <h1>Profile</h1>
+
+    <p>Name: @loggedUser.name</p>
+    <p>Email: @loggedUser.email</p>
+    <img src="@loggedUser.picture">
+}

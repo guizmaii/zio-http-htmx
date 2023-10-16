@@ -5,7 +5,7 @@ import com.guizmaii.zio.htmx.domain.LoggedUser
 import com.guizmaii.zio.htmx.persistence.{Session, SessionStorage}
 import com.guizmaii.zio.htmx.types.CookieSignKey
 import zio.http.*
-import zio.json.{DecoderOps, DeriveJsonCodec, JsonCodec}
+import zio.json.{DecoderOps, DeriveJsonCodec, EncoderOps, JsonCodec}
 import zio.prelude.ForEachOps
 import zio.{Cause, Duration, Random, Schedule, Task, Trace, UIO, URLayer, ZEnvironment, ZIO, ZLayer, durationInt, durationLong}
 
@@ -47,7 +47,7 @@ trait SessionManager {
   def newUserSession(request: Request): Task[(Cookie.Response, Cookie.Response)]
   def loggedUser(request: Request): UIO[Option[LoggedUser]]
 
-  def authMiddleware: HttpAppMiddleware.WithOut[Nothing, Any, Nothing, Throwable, λ[Env => Env & LoggedUser], λ[A => Throwable]]
+  def authMiddleware[R]: HttpAppMiddleware.WithOut[R & LoggedUser, R, Nothing, Any, λ[Env => R], λ[Err => Err]]
 }
 
 object SessionManager {
@@ -149,7 +149,7 @@ final class SessionManagerLive(
         for {
           sessionId  <- random.nextUUID
           expiresIn   = codeTokenResponse.expiresIn.seconds
-          userSession = Session.make(UserSessionContent.from(codeTokenResponse), expiresIn)
+          userSession = Session.make(UserSessionContent.from(codeTokenResponse).toJson, expiresIn)
           _          <- sessionStorage
                           .store(sessionId, userSession)
                           .retry(Schedule.fixed(100.millis) && Schedule.recurs(3).unit)
@@ -188,17 +188,17 @@ final class SessionManagerLive(
   override def loggedUser(request: Request): UIO[Option[LoggedUser]] =
     userSessionState(request).map(_.asSome(_.loggedUser))
 
-  override val authMiddleware: HttpAppMiddleware.WithOut[Nothing, Any, Nothing, Throwable, λ[Env => Env & LoggedUser], λ[A => Throwable]] =
-    new HttpAppMiddleware.Contextual[Nothing, Any, Nothing, Throwable] {
-      type OutEnv[Env] = Env & LoggedUser
-      type OutErr[_]   = Throwable
+  override def authMiddleware[R]: HttpAppMiddleware.WithOut[R & LoggedUser, R, Nothing, Any, λ[Env => R], λ[Err => Err]] =
+    new HttpAppMiddleware.Contextual[R & LoggedUser, R, Nothing, Any] {
+      type OutEnv[_]   = R
+      type OutErr[Err] = Err
 
-      override def apply[Env, Err <: Throwable](
+      override def apply[Env >: R & LoggedUser <: R, Err >: Nothing <: Any](
         http: Http[Env, Err, Request, Response]
-      )(implicit trace: Trace): Http[Env & LoggedUser, Throwable, Request, Response] = {
+      )(implicit trace: Trace): Http[R, Err, Request, Response] = {
 
-        def providedHttp(context: LoggedUser): Http[Env & LoggedUser, Throwable, Request, Response] =
-          http.provideSomeEnvironment[Env](_.union[LoggedUser](ZEnvironment(context)))
+        def providedHttp(context: LoggedUser): Http[R, Err, Request, Response] =
+          http.provideSomeEnvironment[R](_.union[LoggedUser](ZEnvironment(context)))
 
         Http.fromHttpZIO { request =>
           userSessionState(request).map {
@@ -206,13 +206,24 @@ final class SessionManagerLive(
             case SessionState.NoSession | SessionState.Expired =>
               Http.fromHandler {
                 Handler.responseZIO {
-                  for {
-                    (signInUri, state)  <- ZIO.succeed(identityProvider.getSignInUrl)
-                    signInSessionCookie <- newSignInSession(state)
-                  } yield Response
-                    .redirect(signInUri)
-                    .addCookie(signInSessionCookie)
-                    .addCookie(userSessionInvalidationCookie) // We always invalidate the user session cookie to be secure.
+                  ZIO.suspendSucceed {
+                    val (signInUri, state) = identityProvider.getSignInUrl
+
+                    newSignInSession(state)
+                      .foldZIO(
+                        failure = e =>
+                          ZIO
+                            .logFatalCause("Error while handling the sign-in request", Cause.fail(e))
+                            .as(Response.status(Status.InternalServerError)), // TODO Jules: Maybe not the thing to answer with htmx
+                        success = signInSessionCookie =>
+                          ZIO.succeed {
+                            Response
+                              .redirect(signInUri)
+                              .addCookie(signInSessionCookie)
+                              .addCookie(userSessionInvalidationCookie) // We always invalidate the user session cookie to be secure.
+                          },
+                      )
+                  }
                 }
               }
           }
@@ -268,7 +279,7 @@ final class SessionManagerLive(
                             success = tokens =>
                               ZIO.suspendSucceed {
                                 val newUserSessionContent = UserSessionContent.from(tokens)
-                                val newUserSession        = Session.make(newUserSessionContent, tokens.expiresIn.seconds)
+                                val newUserSession        = Session.make(newUserSessionContent.toJson, tokens.expiresIn.seconds)
                                 sessionStorage
                                   .store(id, newUserSession)
                                   .retry(Schedule.fixed(100.millis) && Schedule.recurs(3).unit)

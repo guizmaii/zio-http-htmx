@@ -62,14 +62,20 @@ object Main extends ZIOAppDefault {
     ) >>> Server.live
   }
 
-  private val app =
-    (
-      Router.routes ++ AuthRoutes.routes
-    ) @@ cors(corsConfig) @@ debug @@ timeout(5.seconds)
+  private def app: URIO[SessionManager, App[UsersService & SessionManager]] =
+    ZIO.serviceWith[SessionManager] { sessionManager =>
+      (
+        Router.publicRoutes ++
+          AuthRoutes.routes ++
+          sessionManager.authMiddleware[Any] {
+            Router.authenticatedRoutes
+          }
+      ) @@ cors(corsConfig) @@ debug @@ timeout(5.seconds)
+    }
 
   override def run: ZIO[Environment & ZIOAppArgs & Scope, Any, Any] =
     (
-      bootSequence *> Server.serve(app)
+      bootSequence *> app.flatMap(Server.serve(_))
     ).provide(
       server,
       UsersService.live,

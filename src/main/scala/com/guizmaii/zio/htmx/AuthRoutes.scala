@@ -12,18 +12,23 @@ object AuthRoutes {
   val routes: App[SessionManager] =
     Http.collectZIO[Request] {
 
-      case Method.GET -> Root / "auth" / "sign-in" =>
-        ZIO
-          .serviceWithZIO[SessionManager](_.signInUrl)
-          .foldZIO(
-            failure = e =>
-              ZIO
-                .logErrorCause("Error while handling the sign-in request", Cause.fail(e))
-                .as(Response.status(Status.InternalServerError)), // TODO Jules: Maybe not the thing to answer with htmx
-            success = { case (signInUrl, signInSession) =>
-              ZIO.succeed(Response.redirect(signInUrl).addCookie(signInSession))
-            },
-          )
+      case req @ Method.GET -> Root / "auth" / "sign-in" =>
+        ZIO.serviceWithZIO[SessionManager] { sessionManager =>
+          sessionManager.loggedUser(req).flatMap {
+            case Some(_) => ZIO.succeed(Response.ok)
+            case None    =>
+              sessionManager.signInUrl
+                .foldZIO(
+                  failure = e =>
+                    ZIO
+                      .logErrorCause("Error while handling the sign-in request", Cause.fail(e))
+                      .as(Response.status(Status.InternalServerError)), // TODO Jules: Maybe not the thing to answer with htmx
+                  success = { case (signInUrl, signInSession) =>
+                    ZIO.succeed(Response.redirect(signInUrl).addCookie(signInSession))
+                  },
+                )
+          }
+        }
 
       case req @ Method.GET -> Root / "auth" / "callback" =>
         ZIO

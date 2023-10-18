@@ -9,7 +9,7 @@ import com.guizmaii.zio.htmx.{AppConfig, RuntimeEnv}
 import zio.http.*
 import zio.json.{DecoderOps, DeriveJsonCodec, JsonCodec}
 import zio.prelude.ForEachOps
-import zio.{Cause, Duration, Schedule, Task, Trace, UIO, URLayer, ZEnvironment, ZIO, ZLayer, durationInt, durationLong}
+import zio.{Cause, Duration, Schedule, Task, UIO, URLayer, ZIO, ZLayer, durationInt, durationLong}
 
 import java.time.Instant
 import scala.annotation.nowarn
@@ -97,7 +97,7 @@ trait SessionManager {
   def newUserSession(request: Request): Task[(URL, Cookie.Response, Cookie.Response)]
   def loggedUser(request: Request): UIO[Option[LoggedUser]]
 
-  def authMiddleware[R]: HttpAppMiddleware.WithOut[R & LoggedUser, R, Nothing, Any, λ[Env => R], λ[Err => Err]]
+  def authMiddleware: HandlerAspect[Any, LoggedUser]
 }
 
 object SessionManager {
@@ -215,8 +215,8 @@ final class SessionManagerLive(
 
     for {
       maybeSignInSession <- signInState(request)
-      maybeState          = request.url.queryParams.get("state").flatMap(_.headOption.filter(_.nonEmpty))
-      maybeCode           = request.url.queryParams.get("code").flatMap(_.headOption.filter(_.nonEmpty))
+      maybeState          = request.url.queryParams.get("state").filter(_.nonEmpty)
+      maybeCode           = request.url.queryParams.get("code").filter(_.nonEmpty)
       cookies            <- (maybeCode, maybeSignInSession, maybeState) match {
                               case (Some(code), Some(SignInSessionContent(savedState, redirectTo)), Some(state)) if savedState == state =>
                                 for {
@@ -233,46 +233,31 @@ final class SessionManagerLive(
   override def loggedUser(request: Request): UIO[Option[LoggedUser]] =
     userSessionState(request).map(_.asSome(_.loggedUser))
 
-  override def authMiddleware[R]: HttpAppMiddleware.WithOut[R & LoggedUser, R, Nothing, Any, λ[Env => R], λ[Err => Err]] =
-    new HttpAppMiddleware.Contextual[R & LoggedUser, R, Nothing, Any] {
-      type OutEnv[_]   = R
-      type OutErr[Err] = Err
-
-      override def apply[Env >: R & LoggedUser <: R, Err >: Nothing <: Any](
-        http: Http[Env, Err, Request, Response]
-      )(implicit trace: Trace): Http[R, Err, Request, Response] = {
-
-        def providedHttp(context: LoggedUser): Http[R, Err, Request, Response] =
-          http.provideSomeEnvironment[R](_.union[LoggedUser](ZEnvironment(context)))
-
-        Http.fromHttpZIO { request =>
-          userSessionState(request).map {
-            case SessionState.Valid(session)                   => providedHttp(session.loggedUser)
+  override val authMiddleware: HandlerAspect[Any, LoggedUser] =
+    Middleware.interceptIncomingHandler {
+      Handler.fromFunctionZIO { request =>
+        userSessionState(request)
+          .flatMap {
+            case SessionState.Valid(session)                   => ZIO.succeed((request, session.loggedUser))
             case SessionState.NoSession | SessionState.Expired =>
-              Http.fromHandler {
-                Handler.fromFunctionZIO { request =>
-                  ZIO.suspendSucceed {
-                    val (signInUri, state) = identityProvider.getSignInUrl
+              ZIO.suspendSucceed {
+                val (signInUri, state) = identityProvider.getSignInUrl
 
-                    newSignInSession(state, redirectTo = request.url)
-                      .foldZIO(
-                        failure = e =>
-                          ZIO
-                            .logFatalCause("Error while handling the sign-in request", Cause.fail(e))
-                            .as(Response.status(Status.InternalServerError)), // TODO Jules: Maybe not the thing to answer with htmx
-                        success = signInSessionCookie =>
-                          ZIO.succeed {
-                            Response
-                              .redirect(signInUri)
-                              .addCookie(signInSessionCookie)
-                              .addCookie(userSessionInvalidationCookie) // We always invalidate the user session cookie to be secure.
-                          },
-                      )
-                  }
-                }
+                newSignInSession(state, redirectTo = request.url)
+                  .foldZIO(
+                    failure = e =>
+                      ZIO.logFatalCause("Error while handling the sign-in request", Cause.fail(e)) *>
+                        ZIO.fail(Response.status(Status.InternalServerError)), // TODO Jules: Maybe not the thing to answer with htmx
+                    success = signInSessionCookie =>
+                      ZIO.fail {
+                        Response
+                          .redirect(signInUri)
+                          .addCookie(signInSessionCookie)
+                          .addCookie(userSessionInvalidationCookie) // We always invalidate the user session cookie to be secure.
+                      },
+                  )
               }
           }
-        }
       }
     }
 

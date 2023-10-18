@@ -8,7 +8,7 @@ import zio.config.{ConfigDescriptor, ReadError, ZConfig}
 import zio.http.*
 import zio.json.{DecoderOps, DeriveJsonDecoder, JsonDecoder}
 import zio.prelude.BicovariantOps
-import zio.{Task, URLayer, ZEnvironment, ZIO, ZLayer}
+import zio.{Task, URLayer, ZIO, ZLayer}
 
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
@@ -138,7 +138,7 @@ object IdentityProvider {
     ZLayer.fromZIO {
       for {
         config      <- ZIO.service[KindeConfig]
-        client      <- ZIO.environment[Client]
+        client      <- ZIO.service[Client]
         secureRandom = SecureRandom.getInstance("NativePRNGNonBlocking")
       } yield new Kinde(config, client, secureRandom)
     }
@@ -149,7 +149,7 @@ object IdentityProvider {
  *  - information from: https://kinde.com/docs/developer-tools/using-kinde-without-an-sdk/
  *  - TS SDK: https://github.com/kinde-oss/kinde-typescript-sdk
  */
-final class Kinde(config: KindeConfig, client: ZEnvironment[Client], secureRandom: SecureRandom) extends IdentityProvider {
+final class Kinde(config: KindeConfig, client: Client, secureRandom: SecureRandom) extends IdentityProvider {
 
   /**
    * `%20` is the `+` character url encoded
@@ -204,77 +204,83 @@ final class Kinde(config: KindeConfig, client: ZEnvironment[Client], secureRando
    * }}}
    */
   override def handleSignIn(code: String): Task[CodeTokenResponse] =
-    (
-      for {
-        response <- Client.request(
-                      Request(
-                        method = Method.POST,
-                        url = tokenUrl,
-                        headers = Headers(
-                          Header.ContentType(MediaType.application.`x-www-form-urlencoded`, charset = Some(StandardCharsets.UTF_8)),
-                          Header.Custom("Jules-SDK", "Scala/0.0.0"),
-                        ),
-                        body = Body.fromURLEncodedForm(
-                          Form.fromStrings(
-                            "grant_type"    -> "authorization_code",
-                            "client_id"     -> config.clientId,
-                            "client_secret" -> clientSecret,
-                            "redirect_uri"  -> config.callbackUrl,
-                            "code"          -> code,
+    ZIO
+      .scoped[Client] {
+        (
+          for {
+            response <- Client.request(
+                          Request(
+                            method = Method.POST,
+                            url = tokenUrl,
+                            headers = Headers(
+                              Header.ContentType(MediaType.application.`x-www-form-urlencoded`, charset = Some(StandardCharsets.UTF_8)),
+                              Header.Custom("Jules-SDK", "Scala/0.0.0"),
+                            ),
+                            body = Body.fromURLEncodedForm(
+                              Form.fromStrings(
+                                "grant_type"    -> "authorization_code",
+                                "client_id"     -> config.clientId,
+                                "client_secret" -> clientSecret,
+                                "redirect_uri"  -> config.callbackUrl,
+                                "code"          -> code,
+                              )
+                            ),
+                            version = Version.Http_1_1,
+                            remoteAddress = None,
                           )
-                        ),
-                        version = Version.Http_1_1,
-                        remoteAddress = None,
-                      )
-                    )
-        raw      <- if (response.status.isSuccess) response.body.asString
-                    else {
-                      response.body.asString.flatMap { body =>
-                        val error = s"Error while getting the tokens: ${response.status.code} - ${response.headers.toString()} - $body"
-                        ZIO.logDebug(error) *> ZIO.fail(new RuntimeException(error))
-                      }
-                    }
-        _        <- ZIO.logDebug(s"Raw `authorization_code` response from Kinde - $raw")
-        parsed   <- ZIO.fromEither(raw.fromJson[CodeTokenResponse].leftMap(new RuntimeException(_)))
-      } yield parsed
-    ).logError("Error while handling the sign-in")
-      .provideEnvironment(client)
+                        )
+            raw      <- if (response.status.isSuccess) response.body.asString
+                        else {
+                          response.body.asString.flatMap { body =>
+                            val error = s"Error while getting the tokens: ${response.status.code} - ${response.headers.toString()} - $body"
+                            ZIO.logDebug(error) *> ZIO.fail(new RuntimeException(error))
+                          }
+                        }
+            _        <- ZIO.logDebug(s"Raw `authorization_code` response from Kinde - $raw")
+            parsed   <- ZIO.fromEither(raw.fromJson[CodeTokenResponse].leftMap(new RuntimeException(_)))
+          } yield parsed
+        ).logError("Error while handling the sign-in")
+      }
+      .provide(ZLayer.succeed(client))
 
   override def refreshTokens(refreshToken: String): Task[CodeTokenResponse] =
-    (
-      for {
-        response <- Client.request(
-                      Request(
-                        method = Method.POST,
-                        url = tokenUrl,
-                        headers = Headers(
-                          Header.ContentType(MediaType.application.`x-www-form-urlencoded`, charset = Some(StandardCharsets.UTF_8)),
-                          Header.Custom("Jules-SDK", "Scala/0.0.0"),
-                        ),
-                        body = Body.fromURLEncodedForm(
-                          Form.fromStrings(
-                            "grant_type"    -> "refresh_token",
-                            "client_id"     -> config.clientId,
-                            "client_secret" -> clientSecret,
-                            "refresh_token" -> refreshToken,
+    ZIO
+      .scoped[Client] {
+        (
+          for {
+            response <- Client.request(
+                          Request(
+                            method = Method.POST,
+                            url = tokenUrl,
+                            headers = Headers(
+                              Header.ContentType(MediaType.application.`x-www-form-urlencoded`, charset = Some(StandardCharsets.UTF_8)),
+                              Header.Custom("Jules-SDK", "Scala/0.0.0"),
+                            ),
+                            body = Body.fromURLEncodedForm(
+                              Form.fromStrings(
+                                "grant_type"    -> "refresh_token",
+                                "client_id"     -> config.clientId,
+                                "client_secret" -> clientSecret,
+                                "refresh_token" -> refreshToken,
+                              )
+                            ),
+                            version = Version.Http_1_1,
+                            remoteAddress = None,
                           )
-                        ),
-                        version = Version.Http_1_1,
-                        remoteAddress = None,
-                      )
-                    )
-        raw      <- if (response.status.isSuccess) response.body.asString
-                    else {
-                      response.body.asString.flatMap { body =>
-                        val error = s"Error while refreshing the tokens: ${response.status.code} - ${response.headers.toString()} - $body"
-                        ZIO.logDebug(error) *> ZIO.fail(new RuntimeException(error))
-                      }
-                    }
-        _        <- ZIO.logDebug(s"Raw `refresh_token` response from Kinde - $raw")
-        parsed   <- ZIO.fromEither(raw.fromJson[CodeTokenResponse].leftMap(new RuntimeException(_)))
-      } yield parsed
-    ).logError("Error while refreshing the tokens")
-      .provideEnvironment(client)
+                        )
+            raw      <- if (response.status.isSuccess) response.body.asString
+                        else {
+                          response.body.asString.flatMap { body =>
+                            val error = s"Error while refreshing the tokens: ${response.status.code} - ${response.headers.toString()} - $body"
+                            ZIO.logDebug(error) *> ZIO.fail(new RuntimeException(error))
+                          }
+                        }
+            _        <- ZIO.logDebug(s"Raw `refresh_token` response from Kinde - $raw")
+            parsed   <- ZIO.fromEither(raw.fromJson[CodeTokenResponse].leftMap(new RuntimeException(_)))
+          } yield parsed
+        ).logError("Error while refreshing the tokens")
+      }
+      .provide(ZLayer.succeed(client))
 
   override val logoutUrl: URL =
     URL

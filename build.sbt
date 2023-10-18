@@ -18,6 +18,8 @@ ThisBuild / scalafixDependencies ++= List(
   "io.github.ghostbuster91.scalafix-unified" %% "unified"  % "0.0.9",
 )
 
+ThisBuild / resolvers ++= Resolver.sonatypeOssRepos("snapshots")
+
 // ### Aliases ###
 
 addCommandAlias("tc", "Test/compile")
@@ -38,6 +40,6 @@ lazy val root =
     .settings(reLogTag := "zio-http-htmx")
     .settings(
       name := "zio-http-htmx",
-      libraryDependencies ++= Seq(zioHttp) ++ loggingRuntime,
+      libraryDependencies ++= Seq(zioHttp, zioJson) ++ loggingRuntime ++ zioConfig,
       testFrameworks += new TestFramework("zio.test.sbt.ZTestFramework"),
     )

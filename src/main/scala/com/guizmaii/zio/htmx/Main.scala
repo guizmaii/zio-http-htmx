@@ -1,8 +1,10 @@
 package com.guizmaii.zio.htmx
 
-import com.guizmaii.zio.htmx.services.UsersService
+import com.guizmaii.zio.htmx.persistence.SessionStorage
+import com.guizmaii.zio.htmx.services.*
 import zio.*
 import zio.http.*
+import zio.http.Middleware.{CorsConfig, cors, debug, timeout}
 import zio.http.Server.{Config, RequestStreaming}
 import zio.logging.backend.SLF4J
 
@@ -19,6 +21,9 @@ object Main extends ZIOAppDefault {
   override val bootstrap: ZLayer[ZIOAppArgs, Any, Any] =
     (zio.Runtime.removeDefaultLoggers >>> SLF4J.slf4j) ++
       Runtime.setExecutor(Executor.makeDefault(autoBlocking = false))
+
+  // TODO: Not prod ready
+  private val corsConfig: CorsConfig = CorsConfig(allowedOrigin = _ => Some(Header.AccessControlAllowOrigin.All))
 
   private val bootSequence: ZIO[Any, Throwable, Unit] =
     for {
@@ -56,12 +61,27 @@ object Main extends ZIOAppDefault {
     ) >>> Server.live
   }
 
+  private def app: URIO[SessionManager, HttpApp[UsersService & SessionManager]] =
+    ZIO.serviceWith[SessionManager] { sessionManager =>
+      (
+        Router.publicRoutes ++
+          AuthRoutes.routes ++
+          Router.authenticatedRoutes(sessionManager.authMiddleware)
+      ) @@ cors(corsConfig) @@ debug @@ timeout(5.seconds)
+    }
+
   override def run: ZIO[Environment & ZIOAppArgs & Scope, Any, Any] =
     (
-      bootSequence *>
-        Server.serve(Router.routes)
+      bootSequence *> app.flatMap(Server.serve(_))
     ).provide(
       server,
       UsersService.live,
+      AppConfig.fromSystemEnv,
+      KindeConfig.fromSystemEnv,
+      IdentityProvider.kinde,
+      Client.default,
+      SessionManager.live,
+      SessionStorage.inMemory[SessionId],
+      ZLayer.succeed(RuntimeEnv.Dev), // TODO: Not prod ready. Should be loaded from the env for example.
     )
 }

@@ -1,0 +1,14 @@
+@import com.guizmaii.zio.htmx.ui.Toast
+
+@(toast: Toast = Toast.None)
+
+@main(toast) {
+    <h1>This is not a toast</h1>
+
+    <a href="/">Home</a>
+    <sl-button variant="primary" href="/toast/primary">Primary</sl-button>
+    <sl-button variant="success" href="/toast/success">Success</sl-button>
+    <sl-button variant="neutral" href="/toast/neutral">Neutral</sl-button>
+    <sl-button variant="warning" href="/toast/warning">Warning</sl-button>
+    <sl-button variant="danger" href="/toast/error">Error</sl-button>
+}

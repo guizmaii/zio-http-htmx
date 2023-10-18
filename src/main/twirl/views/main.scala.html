@@ -1,14 +1,112 @@
-@(content: Html)
+@import com.guizmaii.zio.htmx.ui.Toast
+@import play.twirl.api.StringInterpolation
+
+@(toast: Toast = Toast.None)(content: Html)
 <!doctype html>
 <html lang="en">
     <head>
         <meta charset="UTF-8" />
         <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>zio-http-htmx</title>
+        <script type="module" src="https://cdn.jsdelivr.net/npm/@@shoelace-style/shoelace@@2.10.0/cdn/shoelace-autoloader.js"></script>
+        <script type="module" src="https://cdn.jsdelivr.net/npm/@@shoelace-style/shoelace@@2.10.0/cdn/components/alert/alert.js"></script>
+        <link
+        rel="stylesheet"
+        media="(prefers-color-scheme:light)"
+        href="https://cdn.jsdelivr.net/npm/@@shoelace-style/shoelace@@2.10.0/cdn/themes/light.css"
+        />
+        <link
+        rel="stylesheet"
+        media="(prefers-color-scheme:dark)"
+        href="https://cdn.jsdelivr.net/npm/@@shoelace-style/shoelace@@2.10.0/cdn/themes/dark.css"
+        onload="document.documentElement.classList.add('sl-theme-dark');"
+        />
         <script src="https://unpkg.com/htmx.org@@1.9.6"></script>
+
+            <!-- Comes from https://shoelace.style/getting-started/usage#waiting-for-components-to-load -->
+        <style>
+                body {
+                    opacity: 0;
+                }
+
+                body.ready {
+                    opacity: 1;
+                    transition: 0.25s opacity;
+                }
+
+                .sl-toast-stack {
+                    left: auto;
+                    right: 0;
+                    bottom: auto;
+                    top: 0;
+                }
+        </style>
+        <script type="module">
+                const ready = Promise.allSettled([
+                    customElements.whenDefined('sl-alert'),
+                ]);
+
+                window.ready = ready
+
+                await ready
+
+                // Button is registered now! Add the `ready` class so the UI fades in.
+                document.body.classList.add('ready');
+        </script>
     </head>
     <body>
         <div id="content">@content</div>
+        <div class="alert-toast">
+            <sl-alert variant="primary" duration="3000" closable>
+                <sl-icon slot="icon" name="info-circle"></sl-icon>
+                @toast.message
+            </sl-alert>
+
+            <sl-alert variant="success" duration="3000" closable>
+                <sl-icon slot="icon" name="check2-circle"></sl-icon>
+                @toast.message
+            </sl-alert>
+
+            <sl-alert variant="neutral" duration="3000" closable>
+                <sl-icon slot="icon" name="gear"></sl-icon>
+                @toast.message
+            </sl-alert>
+
+            <sl-alert variant="warning" duration="3000" closable>
+                <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+                @toast.message
+            </sl-alert>
+
+            <sl-alert variant="danger" duration="3000" closable>
+                <sl-icon slot="icon" name="exclamation-octagon"></sl-icon>
+                <strong>@toast.message</strong>
+                @{
+                    toast.details match {
+                        case Some(value) => html"<br />$value"
+                        case None => ""
+                    }
+                }
+            </sl-alert>
+        </div>
+        <script type="module">
+                const container = document.querySelector('.alert-toast');
+
+                function toast(variant) {
+                    const alert = container.querySelector(`sl-alert[variant="${variant}"]`)
+                    return alert.toast();
+                }
+
+                await window.ready
+
+                @{toast match {
+                    case Toast.None => ""
+                    case _: Toast.Primary => html"toast('primary')"
+                    case _: Toast.Success => html"toast('success')"
+                    case _: Toast.Neutral => html"toast('neutral')"
+                    case _: Toast.Warning => html"toast('warning')"
+                    case _: Toast.Error => html"toast('danger')"
+                }}
+        </script>
     </body>
 </html>

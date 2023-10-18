@@ -1,15 +1,17 @@
 @import com.guizmaii.zio.htmx.domain.{LoggedUser, User}
+@import com.guizmaii.zio.htmx.ui.Toast
 
-@(loggedUser: Option[LoggedUser] = None)(searchValue: Option[String] = None, users: Option[List[User]] = None)
+@(toast: Toast = Toast.None)(loggedUser: Option[LoggedUser] = None)(searchValue: Option[String] = None, users: Option[List[User]] = None)
 
-@main {
+@main(toast) {
     <h1>Hello @loggedUser.map(_.firstName).getOrElse("htmx")</h1>
 
-    <button hx-get="/names" hx-swap="outerHTML">Show names</button>
-    <a href="/blog" hx-boost="true">Blog</a>
-    <a href="/auth/sign-in">Sign in</a>
-    <a href="/auth/sign-out">Sign out</a>
-    <a href="/profile">Profile</a>
+    <sl-button hx-get="/names" hx-swap="outerHTML">Show names</sl-button>
+    <sl-button href="/blog" hx-boost="true">Blog</sl-button>
+    <sl-button href="/auth/sign-in">Sign in</sl-button>
+    <sl-button href="/auth/sign-out">Sign out</sl-button>
+    <sl-button href="/profile">Profile</sl-button>
+    <sl-button href="/toast">Toast</sl-button>
     @* Reproducing https://htmx.org/examples/active-search/ example *@
     <h3>
         Search Contacts

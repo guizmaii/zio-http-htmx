@@ -1,8 +1,10 @@
 package com.guizmaii.zio.htmx
 
 import com.guizmaii.zio.htmx.services.SessionManager
+import com.guizmaii.zio.htmx.ui.Toast
 import zio.http.*
-import zio.{Cause, ZIO}
+import zio.http.extensions.RichResponseType
+import zio.{Cause, Chunk, ZIO}
 
 object AuthRoutes {
 
@@ -30,7 +32,10 @@ object AuthRoutes {
                                        failure = e =>
                                          ZIO
                                            .logErrorCause("Error while handling the sign-in request", Cause.fail(e))
-                                           .as(Response.status(Status.InternalServerError)), // TODO Jules: Maybe not the thing to answer with htmx
+                                           .as(
+                                             // TODO Jules
+                                             Response.twirl(views.html.index(toast = Toast.Error("Authentication failed"))()())
+                                           ),
                                        success = { case (signInUrl, signInSession) =>
                                          ZIO.succeed(Response.redirect(signInUrl).addCookie(signInSession))
                                        },
@@ -46,7 +51,8 @@ object AuthRoutes {
               failure = e =>
                 ZIO
                   .logErrorCause("Error while handling the sign-in callback", Cause.fail(e))
-                  .as(Response.status(Status.Unauthorized)), // TODO Jules: Can we do better?
+                  // TODO Jules
+                  .as(Response.redirect(URL.root.queryParams("error" -> Chunk.single("Authentication failed")))),
               success = { case (redirectTo, newUserSession, signInSessionInvalidation) =>
                 ZIO.succeed {
                   Response

@@ -4,9 +4,8 @@ import com.guizmaii.zio.htmx.persistence.SessionStorage
 import com.guizmaii.zio.htmx.services.*
 import zio.*
 import zio.http.*
-import zio.http.HttpAppMiddleware.*
+import zio.http.Middleware.{CorsConfig, cors, debug, timeout}
 import zio.http.Server.{Config, RequestStreaming}
-import zio.http.internal.middlewares.Cors.CorsConfig
 import zio.logging.backend.SLF4J
 
 import java.lang.Runtime as JRuntime
@@ -62,14 +61,12 @@ object Main extends ZIOAppDefault {
     ) >>> Server.live
   }
 
-  private def app: URIO[SessionManager, App[UsersService & SessionManager]] =
+  private def app: URIO[SessionManager, HttpApp[UsersService & SessionManager]] =
     ZIO.serviceWith[SessionManager] { sessionManager =>
       (
         Router.publicRoutes ++
           AuthRoutes.routes ++
-          sessionManager.authMiddleware[Any] {
-            Router.authenticatedRoutes
-          }
+          Router.authenticatedRoutes(sessionManager.authMiddleware)
       ) @@ cors(corsConfig) @@ debug @@ timeout(5.seconds)
     }
 

@@ -5,7 +5,7 @@ object Libraries {
   val zioVersion       = "2.0.18"
   val slf4jVersion     = "2.0.9"
   val zioConfigVersion = "3.0.7"
-  val zioHttpVersion   = "3.0.0-RC2" // "3.0.0-RC2+26-288a646a-SNAPSHOT"
+  val zioHttpVersion   = "3.0.0-RC2+115-3a6525ce-SNAPSHOT"
   val zioJsonVersion   = "0.6.2"
 
   val zio        = "dev.zio" %% "zio"                % zioVersion

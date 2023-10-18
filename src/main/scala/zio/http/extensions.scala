@@ -1,7 +1,6 @@
 package zio.http
 
 import play.twirl.api.HtmlFormat
-import zio.http.Response.BasicResponse
 
 object extensions {
 
@@ -9,10 +8,10 @@ object extensions {
 
   implicit final class RichResponseType(private val dummy: Response.type) extends AnyVal {
     def twirl(html: HtmlFormat.Appendable, status: Status = Status.Ok): Response =
-      new BasicResponse(
-        Body.fromCharSequence(html.toString),
-        contentTypeHtml,
+      Response(
         status,
+        contentTypeHtml,
+        Body.fromCharSequence(html.toString),
       )
   }
 
